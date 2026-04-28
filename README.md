@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # AI For Accountability Hackathon
 
 A multi-dataset analysis platform for Canadian government transparency and accountability research, built for the **AI For Accountability Hackathon** (April 29, 2026).
@@ -231,3 +232,6 @@ Pure-function tests run instantly. DB-dependent tests require the modules' `.env
 Source code and pipeline: **MIT** — see [LICENSE](LICENSE).
 
 Data: redistributed under the original publishers' licences — **[Open Government Licence – Canada](https://open.canada.ca/en/open-government-licence-canada)** (CRA and federal data) and **[Open Government Licence – Alberta](https://open.alberta.ca/licence)** (Alberta data). The MIT licence on this repository covers the source code only and does not relicense the underlying data. See [ATTRIBUTIONS.md](ATTRIBUTIONS.md) for full source-attribution details and third-party library credits; see [SECURITY.md](SECURITY.md) for the credential-handling convention.
+=======
+# Agency-2026-Hackathon
+>>>>>>> d4d137d878cc9b2e03b53d380b3ce2b3170789cf
