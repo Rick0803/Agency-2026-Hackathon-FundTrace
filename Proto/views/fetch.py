@@ -15,6 +15,7 @@ from agent.orchestrator import (
     count_entity_picker_options,
 )
 from views.general import (
+    clear_downstream_results,
     go_to_page,
     set_selected_entity,
     render_selected_entity_banner,
@@ -36,7 +37,7 @@ def _labeled_bar_chart(df: pd.DataFrame, x_col: str, y_col: str, height: int = 3
         y=alt.Y(f"{y_col}:Q"),
         tooltip=[x_col, y_col],
     )
-    labels = bars.mark_text(dy=-6, fontSize=12).encode(
+    labels = bars.mark_text(dy=-6, fontSize=12, color="white").encode(
         text=alt.Text(f"{y_col}:Q"),
     )
     return (bars + labels).properties(height=height)
@@ -169,7 +170,20 @@ def render_fetch_summary(data: dict) -> None:
 def render_fetch() -> None:
     st.title("Public Funding Risk Intelligence Agent")
     st.subheader("Fetch Mode — Zombie Recipient Detection")
-    st.caption("Five approaches to flag anomalies in public funding. No LLM used.")
+    st.caption("Four approaches to fetch and mark suspicious entities in public funding data.")
+    st.warning("TODO: Fix the Fetch page title, subtitle, and caption.")
+
+    flagged_count = len(st.session_state.get("flagged_list", []))
+    if flagged_count:
+        next_col, _ = st.columns([1, 3])
+        with next_col:
+            st.button(
+                f"Continue to Flagged ({flagged_count})",
+                type="primary",
+                use_container_width=True,
+                on_click=go_to_page,
+                args=("Flagged",),
+            )
 
     with st.expander("About the data", expanded=False):
         st.markdown(
@@ -185,7 +199,16 @@ known organization in the entity registry — these are typically malformed or m
             """
         )
 
-    way1, way2, way3, way4 = st.tabs(["Way 1", "Way 2", "Way 3", "Way 4"])
+    st.write(
+        "Use one of the four methods below to fetch records and mark suspicious entities for further review."
+    )
+
+    way1, way2, way3, way4 = st.tabs([
+        "User-Defined Rules",
+        "AI-Empowered Algorithms",
+        "Natural Language Database Search",
+        "Filter Lookup",
+    ])
 
     with way1:
         _render_way1()
@@ -194,15 +217,20 @@ known organization in the entity registry — these are typically malformed or m
         _render_way2()
 
     with way3:
-        render_open_search()
+        _render_natural_language_search()
 
     with way4:
         _render_way4_raw_lookup()
 
 
 def _render_way1() -> None:
-    st.subheader("Way 1 — Rule-Based Zombie Detection")
+    st.subheader("User-Defined Rules")
     st.caption("Flags recipients using hard heuristic rules. No LLM used.")
+    st.markdown(
+        "This method turns domain knowledge into **10 configurable rules** for spotting suspicious "
+        "funding and filing patterns. Users can adjust key thresholds before running the scan, so the "
+        "rules reflect the review context rather than a fixed black-box setting."
+    )
 
     with st.expander("How the rules work", expanded=True):
         st.markdown(
@@ -210,20 +238,18 @@ def _render_way1() -> None:
 **Zombie recipients** are organizations that received public funding but show signs of having
 ceased operations or never meaningfully delivered on that funding.
 
-Any entity that triggers **at least one rule** is flagged for further analysis.
-
 | # | Rule | Flag |
 |---|------|------|
-| R1 | **Ceased operations** — last CRA T3010 filing was 2022 or earlier (2+ years before the 2024 dataset cutoff), indicating the org has gone dark | `flag_ceased` |
-| R2 | **Stopped filing ≤12mo after last grant** — last CRA T3010 filing falls within one year after last federal grant | `flag_stopped_within_12mo` |
-| R3 | **High government dependency** — avg government revenue share ≥ 70% across all filing years | `flag_high_gov_dependency` |
-| R4 | **No CRA record at all** — entity received federal grants but has zero CRA filings; completely unverifiable | `flag_no_cra_record` |
-| R5 | **Zero private revenue ever** — no donations or earned income across any filing year; 100% reliant on government | `flag_zero_private_revenue` |
-| R6 | **Zero program spend ever** — charitable program expenditure is zero across all filing years | `flag_zero_program_spend` |
-| R7 | **Compensation exceeds program spend** — total compensation paid out is greater than total spent on programs | `flag_comp_exceeds_programs` |
-| R8 | **Funding gap** — total federal grants received exceed total CRA program spend | `flag_funding_gap` |
-| R9 | **Young org, early grant** — first federal grant arrived within 2 years of first CRA filing; no track record | `flag_young_org` |
-| R10 | **Revenue cliff** — revenue in final filing year dropped below 50% of the prior average; org visibly collapsing | `flag_revenue_cliff` |
+| 1 | **Ceased operations** — last CRA T3010 filing was 2022 or earlier (2+ years before the 2024 dataset cutoff), indicating the org has gone dark | `flag_ceased` |
+| 2 | **Stopped filing ≤12mo after last grant** — last CRA T3010 filing falls within one year after last federal grant | `flag_stopped_within_12mo` |
+| 3 | **High government dependency** — avg government revenue share ≥ 70% across all filing years | `flag_high_gov_dependency` |
+| 4 | **No CRA record at all** — entity received federal grants but has zero CRA filings; completely unverifiable | `flag_no_cra_record` |
+| 5 | **Zero private revenue ever** — no donations or earned income across any filing year; 100% reliant on government | `flag_zero_private_revenue` |
+| 6 | **Zero program spend ever** — charitable program expenditure is zero across all filing years | `flag_zero_program_spend` |
+| 7 | **Compensation exceeds program spend** — total compensation paid out is greater than total spent on programs | `flag_comp_exceeds_programs` |
+| 8 | **Funding gap** — total federal grants received exceed total CRA program spend | `flag_funding_gap` |
+| 9 | **Young org, early grant** — first federal grant arrived within 2 years of first CRA filing; no track record | `flag_young_org` |
+| 10 | **Revenue cliff** — revenue in final filing year dropped below 50% of the prior average; org visibly collapsing | `flag_revenue_cliff` |
             """
         )
 
@@ -232,29 +258,29 @@ Any entity that triggers **at least one rule** is flagged for further analysis.
         tc1, tc2 = st.columns(2)
         with tc1:
             gov_threshold = st.slider(
-                "R3 — Gov dependency threshold",
+                "3 — Gov dependency threshold",
                 min_value=0, max_value=100, value=70, step=5, format="%d%%",
                 help="Flag entities whose average government revenue share is at or above this level.",
             ) / 100
             cliff_threshold = st.slider(
-                "R10 — Revenue cliff drop",
+                "10 — Revenue cliff drop",
                 min_value=10, max_value=90, value=50, step=5, format="%d%%",
                 help="Flag entities whose final filing revenue fell below this % of their prior average.",
             ) / 100
             filing_window = st.slider(
-                "R2 — Filing window after last grant (months)",
+                "2 — Filing window after last grant (months)",
                 min_value=1, max_value=36, value=12, step=1,
                 help="Flag entities whose last CRA filing fell within this many months after their last federal grant.",
             ) * 30
         with tc2:
             ceased_cutoff = st.selectbox(
-                "R1 — Gone dark cutoff year",
+                "1 — Gone dark cutoff year",
                 options=[2020, 2021, 2022, 2023, 2024],
                 index=2,
                 help="Flag entities whose last CRA filing was before January 1 of this year.",
             )
             young_org_years = st.slider(
-                "R9 — Young org track record window (years)",
+                "9 — Young org track record window (years)",
                 min_value=1, max_value=5, value=2, step=1,
                 help="Flag entities whose first federal grant arrived within this many years of their first CRA filing.",
             )
@@ -301,10 +327,10 @@ Any entity that triggers **at least one rule** is flagged for further analysis.
         "flag_young_org", "flag_revenue_cliff",
     ]
     rule_labels = [
-        "R1 Gone dark (≤2022)", "R2 Stopped ≤12mo", "R3 High dependency",
-        "R4 No CRA record", "R5 Zero priv revenue", "R6 Zero prog spend",
-        "R7 Comp > prog spend", "R8 Funding gap",
-        "R9 Young org", "R10 Revenue cliff",
+        "1 Gone dark (≤2022)", "2 Stopped ≤12mo", "3 High dependency",
+        "4 No CRA record", "5 Zero priv revenue", "6 Zero prog spend",
+        "7 Comp > prog spend", "8 Funding gap",
+        "9 Young org", "10 Revenue cliff",
     ]
 
     if "rules_triggered" not in zombie_df.columns:
@@ -378,16 +404,16 @@ Any entity that triggers **at least one rule** is flagged for further analysis.
         "Last CRA filing":     zombie_df["last_cra_filing"],
         "Gov dependency":      zombie_df["avg_gov_dependency"].apply(lambda v: f"{float(v)*100:.1f}%"),
         "Rules triggered":     zombie_df["rules_triggered"],
-        "R1 Ceased":           flag("flag_ceased"),
-        "R2 Stopped ≤12mo":    flag("flag_stopped_within_12mo"),
-        "R3 High dependency":  flag("flag_high_gov_dependency"),
-        "R4 No CRA":           flag("flag_no_cra_record"),
-        "R5 Zero priv rev":    flag("flag_zero_private_revenue"),
-        "R6 Zero prog spend":  flag("flag_zero_program_spend"),
-        "R7 Comp>prog spend":  flag("flag_comp_exceeds_programs"),
-        "R8 Funding gap":      flag("flag_funding_gap"),
-        "R9 Young org":        flag("flag_young_org"),
-        "R10 Revenue cliff":   flag("flag_revenue_cliff"),
+        "1 Ceased":           flag("flag_ceased"),
+        "2 Stopped ≤12mo":    flag("flag_stopped_within_12mo"),
+        "3 High dependency":  flag("flag_high_gov_dependency"),
+        "4 No CRA":           flag("flag_no_cra_record"),
+        "5 Zero priv rev":    flag("flag_zero_private_revenue"),
+        "6 Zero prog spend":  flag("flag_zero_program_spend"),
+        "7 Comp>prog spend":  flag("flag_comp_exceeds_programs"),
+        "8 Funding gap":      flag("flag_funding_gap"),
+        "9 Young org":        flag("flag_young_org"),
+        "10 Revenue cliff":   flag("flag_revenue_cliff"),
     })
     edited_df = st.data_editor(
         display_df,
@@ -425,9 +451,22 @@ Any entity that triggers **at least one rule** is flagged for further analysis.
                     existing_bns.add(row["bn_root"])
                     added += 1
             if added:
+                clear_downstream_results()
                 st.success(f"Added {added} organization(s) to the Flagged List.")
             else:
                 st.info("All selected organizations were already in the Flagged List.")
+
+
+# ─── Natural language database search ─────────────────────────────────────────
+
+def _render_natural_language_search() -> None:
+    st.subheader("Natural Language Database Search")
+    st.markdown(
+        "Use plain-language questions as database queries to fetch matching organizations and ranked results. "
+        "For the most accurate and consistent searches, refer to the glossary before running a query so field "
+        "names, funding concepts, and risk terms are interpreted the way you expect."
+    )
+    render_open_search(show_header=False)
 
 
 # ─── Future Way 3 pseudocode: Open Search inside Fetch ────────────────────────
@@ -534,7 +573,7 @@ Any entity that triggers **at least one rule** is flagged for further analysis.
 #
 
 def _render_way4_raw_lookup() -> None:
-    st.subheader("Way 4 — Raw Data Lookup")
+    st.subheader("Filter Lookup")
     st.caption("Pulls raw data from CRA and FED directly for a selected organization.")
     render_selected_entity_banner()
 
@@ -660,18 +699,18 @@ def _render_way4_raw_lookup() -> None:
 def render_flagged() -> None:
     st.title("Public Funding Risk Intelligence Agent")
     st.subheader("Flagged Entities — Review List")
-    st.caption("Organizations you flagged from the zombie scan. Select one to open in Analyze or Report.")
+    st.caption("The first 10 candidates are preselected for analysis. Adjust the checklist, then continue.")
 
     flagged = st.session_state["flagged_list"]
 
     if not flagged:
-        st.info("No entities flagged yet. Run a zombie scan in Fetch → Way 1 and check the boxes to add organizations here.")
+        st.info("No entities flagged yet. Run a scan in Fetch → User-Defined Rules and check the boxes to add organizations here.")
         return
 
     st.caption(f"{len(flagged)} organization(s) in your list.")
 
     flagged_display = pd.DataFrame({
-        "Remove":          False,
+        "Include":         [i < 10 for i in range(len(flagged))],
         "Organization":    [e["canonical_name"] for e in flagged],
         "BN":              [e["bn_root"] for e in flagged],
         "Province":        [e.get("province", "") for e in flagged],
@@ -684,47 +723,40 @@ def render_flagged() -> None:
         flagged_display,
         use_container_width=True,
         hide_index=True,
-        column_config={"Remove": st.column_config.CheckboxColumn("Remove", default=False)},
-        disabled=[c for c in flagged_display.columns if c != "Remove"],
+        key="flagged_include_editor",
+        column_config={"Include": st.column_config.CheckboxColumn("Include", default=True)},
+        disabled=[c for c in flagged_display.columns if c != "Include"],
     )
 
-    n_remove = int(edited_flagged["Remove"].sum())
-    rem_col, clear_col, _ = st.columns([1, 1, 3])
-    with rem_col:
+    n_include = int(edited_flagged["Include"].sum())
+    st.caption(f"{n_include} organization(s) selected for analysis.")
+
+    apply_col, clear_col, _ = st.columns([1, 1, 3])
+    with apply_col:
         if st.button(
-            f"Remove {n_remove} selected" if n_remove else "Remove selected",
-            disabled=n_remove == 0,
+            "Apply selection",
+            disabled=n_include == len(flagged),
             use_container_width=True,
         ):
-            keep = edited_flagged.index[~edited_flagged["Remove"]].tolist()
+            keep = edited_flagged.index[edited_flagged["Include"]].tolist()
             st.session_state["flagged_list"] = [flagged[i] for i in keep]
+            clear_downstream_results()
             st.rerun()
     with clear_col:
         if st.button("Clear all", use_container_width=True):
             st.session_state["flagged_list"] = []
+            clear_downstream_results()
             st.rerun()
 
     st.divider()
-    st.subheader("Open an entity for analysis")
-
-    selected_idx = st.selectbox(
-        "Organization",
-        range(len(flagged)),
-        format_func=lambda i: (
-            f"{flagged[i]['canonical_name']}  ({flagged[i]['bn_root']})  "
-            f"—  {flagged[i]['rules_triggered']} rules triggered"
-        ),
-    )
-
-    open_col1, open_col2 = st.columns(2)
-    with open_col1:
-        if st.button("Open in Analyze", type="primary", use_container_width=True):
-            set_selected_entity(flagged[selected_idx])
-            go_to_page("Analyze")
-    with open_col2:
-        if st.button("Open in Report", use_container_width=True):
-            set_selected_entity(flagged[selected_idx])
-            go_to_page("Report")
+    st.subheader("Continue to analysis")
+    if st.button("Elevate These Entities by Analyzing Them", type="primary", disabled=n_include == 0, use_container_width=True):
+        keep = edited_flagged.index[edited_flagged["Include"]].tolist()
+        selected_flagged = [flagged[i] for i in keep]
+        st.session_state["flagged_list"] = selected_flagged
+        clear_downstream_results()
+        set_selected_entity(selected_flagged[0])
+        go_to_page("Analyze")
 
 
 def _format_way2_display(df: pd.DataFrame) -> pd.DataFrame:
@@ -750,16 +782,21 @@ def _format_way2_display(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _render_way2() -> None:
-    st.subheader("Way 2 — Peer-Relative Anomaly Detection")
+    st.subheader("AI-Empowered Algorithms")
     st.caption(
         "Ranks organizations that look statistically unusual compared with "
-        "similar publicly funded peers. Uses Way 1 domain knowledge as features. No LLM."
+        "similar publicly funded peers. Uses user-defined rule signals as model features. No LLM."
+    )
+    st.markdown(
+        "This method uses anomaly detection to find organizations whose funding, filing, spending, "
+        "and capacity patterns differ from comparable peers. Instead of checking one rule at a time, "
+        "the algorithm considers multiple signals together and prioritizes entities that deserve closer review."
     )
 
-    with st.expander("How Way 2 works", expanded=False):
+    with st.expander("How This Method Works", expanded=False):
         st.markdown(
             """
-**Way 2 combines unsupervised anomaly detection with the 10 Way 1 zombie rules as domain knowledge features.**
+**This method combines unsupervised anomaly detection with the 10 user-defined rules as domain knowledge features.**
 
 The model scores each organization against its peers — organizations in a similar funding band
 and entity type — rather than against the entire universe. This prevents large hospital networks
@@ -773,7 +810,7 @@ from making small charities look normal.
 | Scale (from FED) | Log federal funding, log agreement count |
 | Gap signals | Funding gap ratio, compensation-to-program ratio, transfers-to-expenses ratio |
 | Time | Years since last CRA filing, grant span years, revenue cliff ratio |
-| Domain knowledge | Rules triggered (count of Way 1 flags), gov × low-program interaction |
+| Domain knowledge | Rules triggered (count of user-defined rule flags), gov × low-program interaction |
 
 **Models available:**
 - **ECOD** — Empirical CDF outlier detection. Parameter-free, fast, robust to outliers in the training data.
@@ -877,7 +914,7 @@ Groups smaller than 15 entities fall back to global scoring.
         rule_dist.columns = ["Rules triggered", "Entities"]
         rule_dist["Rules triggered"] = rule_dist["Rules triggered"].astype(str)
         st.altair_chart(_labeled_bar_chart(rule_dist, "Rules triggered", "Entities", height=250), use_container_width=True)
-        st.caption(f"How many Way 1 rules each top-{len(top_df)} anomaly triggered.")
+        st.caption(f"How many user-defined rules each top-{len(top_df)} anomaly triggered.")
 
     # Results table with checkboxes — sorted by rules triggered desc, then anomaly score desc
     top_df = top_df.sort_values(
@@ -925,6 +962,7 @@ Groups smaller than 15 entities fall back to global scoring.
                     existing_bns.add(row["bn_root"])
                     added += 1
             if added:
+                clear_downstream_results()
                 st.success(f"Added {added} organization(s) to the Flagged List.")
             else:
                 st.info("All selected organizations were already in the Flagged List.")

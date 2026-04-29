@@ -10,10 +10,10 @@ import streamlit as st
 from agent.orchestrator import (
     run_investigation,
     run_narrative_report_from_analysis,
-    run_single_entity_analysis,
 )
 from views.general import (
     SEVERITY_COLOUR,
+    go_to_page,
     render_selected_entity_banner,
     selected_entity_query,
     selected_entity_bn,
@@ -156,14 +156,10 @@ def _render_entity_selector() -> object:
 
 def _render_run_analysis_prompt() -> None:
     st.info(
-        "No computed entity analysis is available yet. Run Batch Analysis first, "
-        "or analyze the currently selected organization here."
+        "No computed entity analysis is available yet. Run Batch Analysis from the Analyze page first."
     )
-    selected = st.session_state.get("selected_entity") or {}
-    if selected.get("bn_root") and st.button("Analyze selected organization", type="primary"):
-        with st.spinner("Computing deterministic entity analysis..."):
-            st.session_state["report_entity_analysis"] = run_single_entity_analysis(selected)
-        st.rerun()
+    if st.button("Go to Analyze", type="primary"):
+        go_to_page("Analyze")
 
 
 def _render_risk_card(result) -> None:

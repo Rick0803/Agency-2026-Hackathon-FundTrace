@@ -3,6 +3,7 @@
 # Import from here in all other view modules to avoid duplication.
 
 import json
+from pathlib import Path
 import streamlit as st
 import pandas as pd
 
@@ -19,6 +20,8 @@ SEVERITY_COLOUR = {
 }
 
 CORE_DATASETS = {"cra", "fed"}
+WORKFLOW_STEPS = ["Fetch", "Flagged", "Analyze", "Report"]
+WORKFLOW_IMAGE_PATH = Path(__file__).resolve().parents[1] / "assets" / "workflow-illustration.png"
 
 
 # ─── Session state ─────────────────────────────────────────────────────────────
@@ -30,12 +33,97 @@ def init_session_state() -> None:
         st.session_state["selected_entity"] = {}
     if "flagged_list" not in st.session_state:
         st.session_state["flagged_list"] = []
+    if "workflow_notice" not in st.session_state:
+        st.session_state["workflow_notice"] = ""
 
 
 # ─── Navigation ────────────────────────────────────────────────────────────────
 
+def has_flagged_entities() -> bool:
+    return bool(st.session_state.get("flagged_list"))
+
+
+def has_analysis_results() -> bool:
+    return bool(
+        st.session_state.get("batch_analysis_results")
+        or st.session_state.get("report_entity_analysis")
+        or st.session_state.get("portfolio_results")
+    )
+
+
+def clear_downstream_results() -> None:
+    for key in (
+        "batch_analysis_results",
+        "portfolio_results",
+        "report_entity_analysis",
+        "narrative_brief",
+        "narrative_brief_bn",
+        "legacy_risk_brief",
+    ):
+        st.session_state.pop(key, None)
+
+
+def page_available(page: str) -> bool:
+    if page in ("Home", "Fetch"):
+        return True
+    if page in ("Flagged", "Analyze"):
+        return has_flagged_entities()
+    if page == "Report":
+        return has_analysis_results()
+    return True
+
+
+def page_prerequisite(page: str) -> str:
+    if page in ("Flagged", "Analyze"):
+        return "Add at least one organization to the Flagged List in Fetch first."
+    if page == "Report":
+        return ""
+    return ""
+
+
+def fallback_page_for(page: str) -> str:
+    if page == "Report":
+        return "Analyze" if has_flagged_entities() else "Fetch"
+    if page in ("Flagged", "Analyze"):
+        return "Fetch"
+    return "Home"
+
+
 def go_to_page(page: str) -> None:
-    st.session_state["page"] = page
+    if page_available(page):
+        st.session_state["page"] = page
+        st.session_state["workflow_notice"] = ""
+        return
+
+    st.session_state["page"] = fallback_page_for(page)
+    st.session_state["workflow_notice"] = page_prerequisite(page)
+
+
+def enforce_workflow_page() -> None:
+    page = st.session_state.get("page", "Home")
+    if page_available(page):
+        return
+    st.session_state["page"] = fallback_page_for(page)
+    st.session_state["workflow_notice"] = page_prerequisite(page)
+
+
+def render_workflow_notice() -> None:
+    notice = st.session_state.get("workflow_notice")
+    if notice:
+        st.warning(notice)
+        st.session_state["workflow_notice"] = ""
+
+
+def workflow_status_label(page: str) -> str:
+    if page == "Fetch":
+        return "1. Fetch and Mark Entities"
+    if page == "Flagged":
+        return "2. Show Flagged Entities"
+    if page == "Analyze":
+        return "3. Analyze Entities"
+    if page == "Report":
+        return "4. Report Entities"
+    return page
 
 
 # ─── Entity helpers ────────────────────────────────────────────────────────────
@@ -252,6 +340,7 @@ Use these terms in your request to get cleaner results.
 
 def render_home() -> None:
     st.title("Public Funding Risk Intelligence Agent")
+    st.warning("TODO: Come up with a final name for this tool.")
     st.caption("Investigate Canadian organizations receiving public funds for ghost capacity patterns.")
     st.divider()
 
@@ -264,56 +353,92 @@ def render_home() -> None:
         "The goal is to make open data easier to access, connect, and use for public accountability."
     )
 
-    col_fetch, col_analyze, col_report = st.columns(3)
+    st.subheader("Workflow")
+    if WORKFLOW_IMAGE_PATH.exists():
+        st.image(str(WORKFLOW_IMAGE_PATH), use_container_width=True)
+        st.caption("image (first draft), need more explanation")
+    else:
+        st.warning("TODO: Add workflow illustration here.")
+    st.write(
+        "The app is intentionally linear: start in Fetch, add candidate organizations to the Flagged List, "
+        "review that list, run deterministic analysis, then export the completed findings in Report. "
+        "Later steps stay locked until the required earlier work is complete, which keeps the output consistent."
+    )
 
-    with col_fetch:
-        st.subheader("Fetch")
-        st.write("Pull raw CRA and federal records for a selected organization without using an LLM.")
-        st.button(
-            "Open Fetch",
-            type="primary",
-            use_container_width=True,
-            on_click=go_to_page,
-            args=("Fetch",),
-        )
-
-    with col_analyze:
-        st.subheader("Analyze")
-        st.write("Compute ghost-capacity signals such as government dependency and program-spend gaps.")
-        st.button(
-            "Open Analyze",
-            use_container_width=True,
-            on_click=go_to_page,
-            args=("Analyze",),
-        )
-
-    with col_report:
-        st.subheader("Report")
-        st.write("Run the full investigation and generate a narrative risk brief with recommendations.")
-        st.button(
-            "Open Report",
-            use_container_width=True,
-            on_click=go_to_page,
-            args=("Report",),
-        )
+    st.button(
+        "Start by Fetching and Marking Entities",
+        type="primary",
+        use_container_width=True,
+        on_click=go_to_page,
+        args=("Fetch",),
+    )
 
     st.divider()
 
-    st.subheader("Signals reviewed")
-    signal_cols = st.columns(5)
-    signal_cols[0].metric("Revenue", "Gov dependency")
-    signal_cols[1].metric("Delivery", "Program spend")
-    signal_cols[2].metric("Capacity", "Employees")
-    signal_cols[3].metric("Flow", "Transfers out")
-    signal_cols[4].metric("Pattern", "Persistence")
+    st.subheader("4 Potential Impacts")
+    st.warning("TODO: Revise this section further. These impact points need stronger wording and supporting evidence.")
+    impact_cols = st.columns(4)
+    impact_cols[0].markdown("**Artificial Intelligence (AI) and Data Science (DS)**")
+    impact_cols[0].markdown("Uses **AI and DS methods** to move beyond **keyword search** and surface **patterns across public records**.")
+    impact_cols[1].markdown("**Explainability**")
+    impact_cols[1].markdown("Shows **why an entity was flagged** and what **evidence supports the finding** to strengthen **accountability**.")
+    impact_cols[2].markdown("**Semi-Automated With a Purpose**")
+    impact_cols[2].markdown("Uses **AI automation** to increase **efficiency** while humans serve as **guardrails** to maintain **output quality**.")
+    impact_cols[3].markdown("**Data-Driven Decision Making**")
+    impact_cols[3].markdown("Turns **connected records** into **evidence-based reporting** that can support **review and action**.")
+
+
+# ─── Zombie recipient context page ────────────────────────────────────────────
+
+def render_zombie_context() -> None:
+    st.title("Zombie Recipient Context")
+    st.caption("Background on the problem this prototype is designed to help investigate.")
+    st.divider()
+
+    st.subheader("What are zombie recipients?")
+    st.write(
+        "In this prototype, zombie recipients are organizations that appear to keep receiving, holding, "
+        "or being associated with public funding while showing signs that their delivery capacity is weak, "
+        "inactive, missing, or difficult to verify. They may have old or missing filings, unusually low "
+        "program spending, high dependence on government revenue, few visible staff, large funding gaps, "
+        "or other signals that suggest the public record deserves closer review."
+    )
+    st.write(
+        "The term is not meant to be a final accusation. It is a triage concept: the app helps identify "
+        "organizations where the available data raises questions, then leaves room for human review, "
+        "context, and follow-up evidence before any conclusion is made."
+    )
+
+    st.subheader("Why this matters")
+    st.write(
+        "Public funding records and charity filings are often spread across different datasets, formats, "
+        "and reporting periods. A single organization can appear many times across grants, departments, "
+        "years, and CRA filings. Without a structured workflow, it is easy to miss patterns that only become "
+        "visible when those records are connected."
+    )
+
+    st.subheader("Our proposed approach")
+    st.write(
+        "The app guides users through a linear review workflow: fetch candidate entities, mark suspicious "
+        "organizations, analyze the selected entities, and export report-ready findings. This keeps the "
+        "review process consistent and reduces the chance that users skip important steps."
+    )
+    st.write(
+        "The Fetch page offers multiple ways to surface candidates: user-defined rules based on domain "
+        "knowledge, AI-empowered anomaly detection, natural-language database search, and a filter lookup "
+        "backup. The Flagged page lets users keep human judgment in the loop by adding or removing entities "
+        "before analysis. The Analyze page then summarizes risk patterns, and the Report page turns the "
+        "results into evidence-based outputs that can support accountability, review, and follow-up action."
+    )
 
 
 # ─── Open Search page ──────────────────────────────────────────────────────────
 
-def render_open_search() -> None:
-    st.title("Public Funding Risk Intelligence Agent")
-    st.subheader("Open Search — Natural language CRA/FED search")
-    st.caption("Ask for ranked tables such as top transfers out, zero-employee funded orgs, or likely ghost-capacity candidates.")
+def render_open_search(show_header: bool = True) -> None:
+    if show_header:
+        st.title("Public Funding Risk Intelligence Agent")
+        st.subheader("Open Search — Natural language CRA/FED search")
+        st.caption("Ask for ranked tables such as top transfers out, zero-employee funded orgs, or likely ghost-capacity candidates.")
 
     search_request = st.text_area(
         "Search request",

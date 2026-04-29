@@ -1,10 +1,11 @@
 # views/analyze.py
 # Analyze page — deterministic ghost capacity scoring, no LLM.
 
+import json
 import streamlit as st
 import pandas as pd
 import altair as alt
-from dataclasses import asdict
+from dataclasses import asdict, is_dataclass
 
 from agent.orchestrator import (
     run_entity_batch_analysis,
@@ -14,10 +15,6 @@ from views.general import (
     SEVERITY_COLOUR,
     go_to_page,
     set_selected_entity,
-    render_selected_entity_banner,
-    selected_entity_query,
-    selected_entity_bn,
-    selected_entity_name,
 )
 
 
@@ -40,20 +37,145 @@ def _labeled_bar_chart(df: pd.DataFrame, x_col: str, y_col: str,
 
 # ─── Public entry point ────────────────────────────────────────────────────────
 
+def _to_plain(value):
+    if is_dataclass(value):
+        return _to_plain(asdict(value))
+    if isinstance(value, pd.DataFrame):
+        return value.to_dict(orient="records")
+    if isinstance(value, pd.Series):
+        return value.to_dict()
+    if isinstance(value, dict):
+        return {k: _to_plain(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_to_plain(v) for v in value]
+    if hasattr(value, "item"):
+        try:
+            return value.item()
+        except Exception:
+            return value
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return value
+
+
+def _batch_results_df(results: list) -> pd.DataFrame:
+    rows = []
+    for r in sorted(results, key=lambda x: x.ghost_score, reverse=True):
+        colour = SEVERITY_COLOUR.get(r.overall_risk, "⚪")
+        rows.append({
+            "Organization":       r.canonical_name,
+            "BN":                 r.bn_root,
+            "Province":           r.province,
+            "Overall Risk":       f"{colour} {r.overall_risk}",
+            "Ghost Score":        f"{r.ghost_score:.3f}",
+            "Avg Gov Dep (%)":    f"{r.avg_gov_dependency*100:.1f}%",
+            "Avg Program Sp (%)": f"{r.avg_program_ratio*100:.1f}%",
+            "Fed Total ($)":      f"${r.fed_total:,.0f}",
+            "Funding Gap ($)":    f"${r.funding_gap:,.0f}",
+            "Employees":          r.total_employees,
+            "CRA Years":          r.cra_years,
+            "Confidence":         r.confidence,
+            "Top Flags":          ", ".join(r.top_flags or []),
+            "Explanation":        r.explanation[:140] + ("..." if len(r.explanation) > 140 else ""),
+        })
+    return pd.DataFrame(rows)
+
+
+def _set_default_report_entity(results: list) -> None:
+    if not results:
+        return
+    top = max(results, key=lambda x: x.ghost_score)
+    set_selected_entity({
+        "canonical_name":  top.canonical_name,
+        "bn_root":         top.bn_root,
+        "entity_type":     top.entity_type,
+        "province":        top.province,
+        "dataset_sources": [
+            s for s in [
+                "cra" if top.has_cra_data else None,
+                "fed" if top.has_fed_data else None,
+            ] if s
+        ],
+    })
+
+
+def _render_export_prompt(kind: str) -> None:
+    st.divider()
+    st.subheader("Export findings")
+    st.write("The analysis is complete. Continue to Report to render risk cards, narrative briefs, and downloadable outputs.")
+
+    export_col, clear_col = st.columns([1, 1])
+    with export_col:
+        if st.button("Continue to Report", type="primary", use_container_width=True, key=f"{kind}_continue_report"):
+            if kind == "batch":
+                _set_default_report_entity(st.session_state.get("batch_analysis_results") or [])
+            go_to_page("Report")
+    with clear_col:
+        if st.button("Clear analysis results", use_container_width=True, key=f"{kind}_clear_results"):
+            if kind == "batch":
+                st.session_state.pop("batch_analysis_results", None)
+            else:
+                st.session_state.pop("portfolio_results", None)
+            st.rerun()
+
+
 def render_analyze() -> None:
     st.title("Public Funding Risk Intelligence Agent")
     st.subheader("Analysis — Deterministic, no LLM")
-    st.caption(
-        "Two modes: analyze your flagged entities as a batch, "
-        "or explore the full funded universe as a portfolio."
+    st.caption("Choose the analysis to run on the curated workflow, then export the completed findings to Report.")
+
+    flagged: list = st.session_state.get("flagged_list", [])
+    if not flagged:
+        st.info("Your flagged list is empty. Go to Fetch and add organizations before analysis.")
+        return
+
+    st.markdown("**Current flagged queue**")
+    st.caption(f"{len(flagged)} organization(s) are ready from the Flagged step.")
+
+    st.subheader("Purpose of analysis")
+    st.write(
+        "This step elevates the flagged entities from a review list into structured findings. "
+        "The goal is to test whether the selected organizations show stronger evidence of ghost-capacity risk, "
+        "then prepare the results for reporting."
+    )
+    st.write(
+        "Analysis is conducted with deterministic scoring logic, not free-form LLM judgment. "
+        "The app combines funding records, CRA filing patterns, program spending, employee signals, "
+        "government dependency, transfers, and rule-based flags into comparable risk outputs."
     )
 
-    tab_batch, tab_portfolio = st.tabs(["Batch Analysis", "Portfolio Dashboard"])
+    st.subheader("Analysis methods")
+    method_cols = st.columns(2)
+    method_cols[0].markdown("**Batch Entity Risk Analysis**")
+    method_cols[0].write(
+        "Scores each selected flagged entity, ranks the results, and highlights the strongest evidence "
+        "for entity-level review."
+    )
+    method_cols[1].markdown("**Portfolio Pattern Analysis**")
+    method_cols[1].write(
+        "Looks across the broader funded universe to summarize aggregate risk patterns by geography, "
+        "entity type, funding band, and department."
+    )
 
-    with tab_batch:
+    options = {
+        "Batch Entity Risk Analysis": (
+            "Runs the deterministic ghost-capacity pipeline for every organization in the Flagged List."
+        ),
+        "Portfolio Pattern Analysis": (
+            "Scans the broader funded universe to summarize aggregate risk patterns by province, entity type, funding band, and department."
+        ),
+    }
+    selected_analysis = st.radio(
+        "Analysis type",
+        list(options.keys()),
+        horizontal=True,
+        key="selected_analysis_type",
+    )
+    st.info(options[selected_analysis])
+
+    if selected_analysis == "Batch Entity Risk Analysis":
         _render_batch_analysis()
-
-    with tab_portfolio:
+    else:
         _render_portfolio_dashboard()
 
 
@@ -62,16 +184,8 @@ def render_analyze() -> None:
 def _render_batch_analysis() -> None:
     flagged: list = st.session_state.get("flagged_list", [])
 
-    if not flagged:
-        st.info(
-            "Your flagged list is empty. "
-            "Go to **Fetch** and use Way 1 or Way 2 results to flag organizations."
-        )
-        return
+    st.write(f"**{len(flagged)} organization(s)** will be analyzed from your Flagged List.")
 
-    st.write(f"**{len(flagged)} organization(s)** in your flagged list")
-
-    # Show flagged table
     flag_rows = []
     for ent in flagged:
         flag_rows.append({
@@ -83,14 +197,12 @@ def _render_batch_analysis() -> None:
         })
     st.dataframe(pd.DataFrame(flag_rows), use_container_width=True, hide_index=True)
 
-    # Run button
     if st.button("Run Batch Analysis", type="primary", key="run_batch"):
         with st.spinner(f"Analyzing {len(flagged)} organization(s)…"):
             results = run_entity_batch_analysis(flagged)
         st.session_state["batch_analysis_results"] = results
         st.rerun()
 
-    # Persist and display results
     results = st.session_state.get("batch_analysis_results")
     if not results:
         return
@@ -109,71 +221,36 @@ def _render_batch_analysis() -> None:
     m3.metric("HIGH",            high_count)
     m4.metric("Avg Ghost Score", f"{avg_ghost:.3f}")
 
-    # Ranked results table
-    table_rows = []
-    for r in sorted(results, key=lambda x: x.ghost_score, reverse=True):
-        colour = SEVERITY_COLOUR.get(r.overall_risk, "⚪")
-        table_rows.append({
-            "Organization":       r.canonical_name,
-            "BN":                 r.bn_root,
-            "Province":           r.province,
-            "Overall Risk":       f"{colour} {r.overall_risk}",
-            "Ghost Score":        f"{r.ghost_score:.3f}",
-            "Avg Gov Dep (%)":    f"{r.avg_gov_dependency*100:.1f}%",
-            "Avg Program Sp (%)": f"{r.avg_program_ratio*100:.1f}%",
-            "Fed Total ($)":      f"${r.fed_total:,.0f}",
-            "Funding Gap ($)":    f"${r.funding_gap:,.0f}",
-            "Employees":          r.total_employees,
-            "CRA Years":          r.cra_years,
-            "Confidence":         r.confidence,
-            "Explanation":        r.explanation[:120] + ("…" if len(r.explanation) > 120 else ""),
-        })
+    st.markdown("**Ranked Findings Preview**")
+    st.dataframe(_batch_results_df(results), use_container_width=True, hide_index=True)
 
-    st.dataframe(pd.DataFrame(table_rows), use_container_width=True, hide_index=True)
+    top_result = max(results, key=lambda x: x.ghost_score)
+    st.markdown("**Highest-risk finding**")
+    h1, h2, h3 = st.columns(3)
+    h1.metric("Organization", top_result.canonical_name)
+    h2.metric("Risk", top_result.overall_risk)
+    h3.metric("Ghost Score", f"{top_result.ghost_score:.3f}")
+    st.caption(top_result.explanation)
 
-    # Drill-down
-    st.divider()
-    st.subheader("Drill-down")
-    names = [r.canonical_name for r in results]
-    selected_name = st.selectbox("Select organization for drill-down", names, key="batch_drilldown")
-    selected_result = next((r for r in results if r.canonical_name == selected_name), None)
+    batch_json = json.dumps(_to_plain(results), indent=2, default=str)
+    batch_csv = _batch_results_df(results).to_csv(index=False)
+    dl1, dl2, _ = st.columns([1, 1, 2])
+    dl1.download_button(
+        "Download Preview JSON",
+        data=batch_json,
+        file_name="batch-analysis-preview.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+    dl2.download_button(
+        "Download Preview CSV",
+        data=batch_csv,
+        file_name="batch-analysis-preview.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
 
-    if selected_result:
-        dc1, dc2 = st.columns(2)
-        with dc1:
-            st.markdown(f"**Persistence:** {selected_result.persistence}")
-            st.markdown(f"**Has CRA Data:** {'Yes' if selected_result.has_cra_data else 'No'}")
-            st.markdown(f"**Has FED Data:** {'Yes' if selected_result.has_fed_data else 'No'}")
-            if selected_result.analysis_notes:
-                st.caption(f"Notes: {selected_result.analysis_notes}")
-        with dc2:
-            st.markdown(f"**First Grant:** {selected_result.first_grant_date or '—'}")
-            st.markdown(f"**Last Grant:** {selected_result.last_grant_date or '—'}")
-            st.markdown(f"**Last CRA Filing:** {selected_result.last_cra_filing or '—'}")
-
-        st.markdown("**Signal Breakdown**")
-        for sig in selected_result.signals:
-            colour  = SEVERITY_COLOUR.get(sig.severity, "⚪")
-            flagged = "✓ Flagged" if sig.flagged else "✗ Not flagged"
-            st.markdown(f"{colour} **{sig.label}** — {flagged} (value: {sig.value:.3f}, threshold: {sig.threshold})")
-            st.caption(sig.interpretation)
-
-        btn_col1, btn_col2 = st.columns(2)
-        with btn_col1:
-            if st.button("Open in Report", type="primary", key="batch_open_report"):
-                set_selected_entity({
-                    "canonical_name":  selected_result.canonical_name,
-                    "bn_root":         selected_result.bn_root,
-                    "entity_type":     selected_result.entity_type,
-                    "province":        selected_result.province,
-                    "dataset_sources": ["cra" if selected_result.has_cra_data else None,
-                                        "fed" if selected_result.has_fed_data else None],
-                })
-                go_to_page("Report")
-        with btn_col2:
-            if st.button("Clear Results", key="batch_clear"):
-                st.session_state.pop("batch_analysis_results", None)
-                st.rerun()
+    _render_export_prompt("batch")
 
 
 # ─── Tab 2: Portfolio Dashboard ────────────────────────────────────────────────
@@ -301,19 +378,14 @@ def _render_portfolio_dashboard() -> None:
                 disp_top[col] = disp_top[col].map(lambda x: f"${float(x):,.0f}")
         st.dataframe(disp_top, use_container_width=True, hide_index=True)
 
-        st.markdown("**Select entity from top list to open in Report**")
-        entity_names_top = list(top_ents_df["canonical_name"]) if "canonical_name" in top_ents_df.columns else []
-        if entity_names_top:
-            sel_top = st.selectbox("Organization", entity_names_top, key="portfolio_top_select")
-            sel_row = top_ents_df[top_ents_df["canonical_name"] == sel_top]
-            if st.button("Open in Report", type="primary", key="portfolio_open_report"):
-                if not sel_row.empty:
-                    row = sel_row.iloc[0].to_dict()
-                    set_selected_entity({
-                        "canonical_name":  row.get("canonical_name", ""),
-                        "bn_root":         row.get("bn_root", ""),
-                        "entity_type":     row.get("entity_type", ""),
-                        "province":        row.get("province", ""),
-                        "dataset_sources": ["fed"],
-                    })
-                    go_to_page("Report")
+    portfolio_json = json.dumps(_to_plain(portfolio_result), indent=2, default=str)
+    dl1, _ = st.columns([1, 3])
+    dl1.download_button(
+        "Download Preview JSON",
+        data=portfolio_json,
+        file_name="portfolio-analysis-preview.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+
+    _render_export_prompt("portfolio")
