@@ -449,18 +449,6 @@ def render_home() -> None:
     st.divider()
 
     st.subheader("Why FundTrace is Different")
-    impact_cols = st.columns(4)
-    impact_cols[0].markdown("**Connects Siloed Data**")
-    impact_cols[0].markdown("Links **federal grants** and **CRA charity filings** that are never published together — surfacing patterns invisible in either dataset alone.")
-    impact_cols[1].markdown("**Shows Its Work**")
-    impact_cols[1].markdown("Every risk score comes with **the signals that drove it** — so reviewers can assess the evidence, not just accept a number.")
-    impact_cols[2].markdown("**Human Judgment in the Loop**")
-    impact_cols[2].markdown("AI surfaces candidates and scores risk. **Humans decide** which organizations to investigate and what action to take.")
-    impact_cols[3].markdown("**Report-Ready Output**")
-    impact_cols[3].markdown("Findings export as **structured reports** that can support audit referrals, program reviews, or public accountability work.")
-
-    st.divider()
-
     orig_cols = st.columns(4)
     orig_cols[0].markdown("**Artificial Intelligence (AI) and Data Science (DS)**")
     orig_cols[0].markdown("Uses **AI and DS methods** to move beyond **keyword search** and surface **patterns across public records**.")
