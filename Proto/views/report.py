@@ -963,46 +963,56 @@ def _generate_pdf_report(report: dict) -> bytes:
     pdf.set_auto_page_break(auto=True, margin=18)
     pdf.add_page()
 
+    # fpdf2 >= 2.7 changed multi_cell's default new_x to XPos.RIGHT, which
+    # leaves the cursor at the right margin after each call. The next
+    # multi_cell(0, ...) then has zero available width and crashes.
+    # Fix: always pass new_x="LMARGIN", new_y="NEXT" explicitly, and reset
+    # x to l_margin at the start of each helper as a safety belt.
+
     def _h1(text: str) -> None:
+        pdf.set_x(pdf.l_margin)
         pdf.set_font("Helvetica", "B", 16)
         pdf.set_text_color(30, 58, 95)
-        pdf.multi_cell(0, 9, _safe(text))
+        pdf.multi_cell(0, 9, _safe(text), new_x="LMARGIN", new_y="NEXT")
         pdf.set_text_color(0, 0, 0)
         pdf.ln(1)
 
     def _h2(text: str) -> None:
+        pdf.set_x(pdf.l_margin)
         pdf.set_font("Helvetica", "B", 12)
         pdf.set_text_color(30, 58, 95)
         pdf.set_draw_color(30, 58, 95)
         pdf.line(pdf.l_margin, pdf.get_y() + 1, pdf.w - pdf.r_margin, pdf.get_y() + 1)
         pdf.ln(3)
-        pdf.multi_cell(0, 7, _safe(text))
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(0, 7, _safe(text), new_x="LMARGIN", new_y="NEXT")
         pdf.set_text_color(0, 0, 0)
         pdf.set_draw_color(0, 0, 0)
         pdf.ln(1)
 
     def _h3(text: str) -> None:
+        pdf.set_x(pdf.l_margin)
         pdf.set_font("Helvetica", "B", 10)
         pdf.set_text_color(60, 60, 60)
-        pdf.multi_cell(0, 6, _safe(text))
+        pdf.multi_cell(0, 6, _safe(text), new_x="LMARGIN", new_y="NEXT")
         pdf.set_text_color(0, 0, 0)
 
     def _body(text: str) -> None:
+        pdf.set_x(pdf.l_margin)
         pdf.set_font("Helvetica", "", 10)
-        pdf.multi_cell(0, 5.5, _safe(text))
+        pdf.multi_cell(0, 5.5, _safe(text), new_x="LMARGIN", new_y="NEXT")
         pdf.ln(2)
 
     def _label_value(label: str, value: str) -> None:
+        pdf.set_x(pdf.l_margin)
         pdf.set_font("Helvetica", "B", 10)
-        pdf.write(5.5, _safe(f"{label}: "))
-        pdf.set_font("Helvetica", "", 10)
-        pdf.write(5.5, _safe(value))
-        pdf.ln(6)
+        pdf.multi_cell(0, 5.5, _safe(f"{label}: {value}"), new_x="LMARGIN", new_y="NEXT")
+        pdf.ln(1)
 
     def _bullet(text: str) -> None:
-        pdf.set_font("Helvetica", "", 10)
         pdf.set_x(pdf.l_margin + 4)
-        pdf.multi_cell(0, 5.5, _safe(f"-  {text}"))
+        pdf.set_font("Helvetica", "", 10)
+        pdf.multi_cell(0, 5.5, _safe(f"-  {text}"), new_x="LMARGIN", new_y="NEXT")
         pdf.ln(1)
 
     # ── Title block ──────────────────────────────────────────────────────────
@@ -1015,7 +1025,8 @@ def _generate_pdf_report(report: dict) -> bytes:
         f"Date: {report.get('date', '')}  |  "
         f"Prepared by: {report.get('prepared_by', 'Policy Analysis Unit')}"
     )
-    pdf.multi_cell(0, 5, meta)
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(0, 5, meta, new_x="LMARGIN", new_y="NEXT")
     pdf.set_text_color(0, 0, 0)
     pdf.ln(4)
 
