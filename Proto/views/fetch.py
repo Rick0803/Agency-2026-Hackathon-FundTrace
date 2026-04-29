@@ -929,6 +929,7 @@ def render_flagged() -> None:
         clear_downstream_results()
         set_selected_entity(selected_flagged[0])
         go_to_page("Analyze")
+        st.rerun()
 
 
 def _format_way2_display(df: pd.DataFrame) -> pd.DataFrame:

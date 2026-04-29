@@ -916,6 +916,181 @@ def _build_report_markdown(report: dict) -> str:
     return "\n".join(lines)
 
 
+def _generate_pdf_report(report: dict) -> bytes:
+    """Render the business report dict as a formatted PDF using fpdf2."""
+    from fpdf import FPDF
+
+    class _PDF(FPDF):
+        def header(self):
+            self.set_font("Helvetica", "B", 9)
+            self.set_text_color(120, 120, 120)
+            self.cell(0, 6, "FundTrace — Ghost Capacity Investigation Report", align="R")
+            self.ln(4)
+            self.set_draw_color(200, 200, 200)
+            self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
+            self.ln(3)
+            self.set_text_color(0, 0, 0)
+
+        def footer(self):
+            self.set_y(-12)
+            self.set_font("Helvetica", "I", 8)
+            self.set_text_color(150, 150, 150)
+            self.cell(0, 6, f"Page {self.page_no()} | CONFIDENTIAL — FOR INTERNAL USE ONLY", align="C")
+
+    pdf = _PDF()
+    pdf.set_margins(18, 18, 18)
+    pdf.set_auto_page_break(auto=True, margin=18)
+    pdf.add_page()
+
+    def _h1(text: str) -> None:
+        pdf.set_font("Helvetica", "B", 16)
+        pdf.set_text_color(30, 58, 95)
+        pdf.multi_cell(0, 9, text)
+        pdf.set_text_color(0, 0, 0)
+        pdf.ln(1)
+
+    def _h2(text: str) -> None:
+        pdf.set_font("Helvetica", "B", 12)
+        pdf.set_text_color(30, 58, 95)
+        pdf.set_draw_color(30, 58, 95)
+        pdf.line(pdf.l_margin, pdf.get_y() + 1, pdf.w - pdf.r_margin, pdf.get_y() + 1)
+        pdf.ln(3)
+        pdf.multi_cell(0, 7, text)
+        pdf.set_text_color(0, 0, 0)
+        pdf.set_draw_color(0, 0, 0)
+        pdf.ln(1)
+
+    def _h3(text: str) -> None:
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.set_text_color(60, 60, 60)
+        pdf.multi_cell(0, 6, text)
+        pdf.set_text_color(0, 0, 0)
+
+    def _body(text: str) -> None:
+        pdf.set_font("Helvetica", "", 10)
+        pdf.multi_cell(0, 5.5, str(text))
+        pdf.ln(2)
+
+    def _label_value(label: str, value: str) -> None:
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.write(5.5, f"{label}: ")
+        pdf.set_font("Helvetica", "", 10)
+        pdf.write(5.5, str(value))
+        pdf.ln(6)
+
+    def _bullet(text: str) -> None:
+        pdf.set_font("Helvetica", "", 10)
+        pdf.set_x(pdf.l_margin + 4)
+        pdf.multi_cell(0, 5.5, f"•  {text}")
+        pdf.ln(1)
+
+    # ── Title block ──────────────────────────────────────────────────────────
+    _h1(report.get("report_title", "Ghost Capacity Investigation Report"))
+    pdf.set_font("Helvetica", "", 9)
+    pdf.set_text_color(100, 100, 100)
+    meta = (
+        f"{report.get('document_classification', 'FOR INFORMATION')}  |  "
+        f"{report.get('ar_number', 'AR-2026-XXXX')}  |  "
+        f"Date: {report.get('date', '')}  |  "
+        f"Prepared by: {report.get('prepared_by', 'Policy Analysis Unit')}"
+    )
+    pdf.multi_cell(0, 5, meta)
+    pdf.set_text_color(0, 0, 0)
+    pdf.ln(4)
+
+    # ── Executive Summary ────────────────────────────────────────────────────
+    _h2("Executive Summary")
+    _body(report.get("executive_summary", ""))
+
+    # ── Situation Overview ───────────────────────────────────────────────────
+    situation = report.get("situation_overview", {})
+    if situation:
+        _h2("Situation Overview")
+        if situation.get("scope"):
+            _h3("Scope")
+            _body(situation["scope"])
+        if situation.get("scale"):
+            _h3("Scale")
+            _body(situation["scale"])
+        if situation.get("context"):
+            _h3("Context")
+            _body(situation["context"])
+
+    # ── Key Findings ─────────────────────────────────────────────────────────
+    findings = report.get("key_findings", [])
+    if findings:
+        _h2("Key Findings")
+        for i, finding in enumerate(findings, 1):
+            sev = finding.get("severity", "MEDIUM")
+            icon = {"CRITICAL": "[CRITICAL]", "HIGH": "[HIGH]", "MEDIUM": "[MEDIUM]"}.get(sev, f"[{sev}]")
+            _h3(f"Finding {i} {icon}: {finding.get('finding', '')}")
+            _label_value("Evidence", finding.get("evidence", ""))
+            _label_value("Implications", finding.get("implications", ""))
+            pdf.ln(2)
+
+    # ── Risk Assessment ──────────────────────────────────────────────────────
+    risk = report.get("risk_assessment", {})
+    if risk:
+        _h2("Risk Assessment")
+        _label_value("Overall Risk Level", risk.get("overall_risk_level", ""))
+        _label_value("Financial Exposure", risk.get("financial_exposure", ""))
+        if risk.get("systemic_concerns"):
+            _label_value("Systemic Concerns", risk["systemic_concerns"])
+        if risk.get("geographic_concentration"):
+            _label_value("Geographic Concentration", risk["geographic_concentration"])
+
+    # ── Recommendations ──────────────────────────────────────────────────────
+    recs = report.get("recommendations", [])
+    if recs:
+        _h2("Recommendations")
+        for i, rec in enumerate(recs, 1):
+            _h3(f"Recommendation {i} [{rec.get('priority', '')}]: {rec.get('recommendation', '')}")
+            _label_value("Rationale", rec.get("rationale", ""))
+            _label_value("Expected Outcome", rec.get("expected_outcome", ""))
+            _label_value("Resources Required", rec.get("resources_required", ""))
+            pdf.ln(2)
+
+    # ── Next Steps ───────────────────────────────────────────────────────────
+    next_steps = report.get("next_steps", {})
+    if next_steps:
+        _h2("Next Steps")
+        immediate = next_steps.get("immediate_actions", [])
+        if immediate:
+            _h3("Immediate Actions")
+            for action in immediate:
+                _bullet(action)
+        followup = next_steps.get("follow_up_required", [])
+        if followup:
+            _h3("Follow-up Required")
+            for item in followup:
+                _bullet(item)
+        if next_steps.get("timeline"):
+            _label_value("Timeline", next_steps["timeline"])
+
+    # ── Limitations ──────────────────────────────────────────────────────────
+    if report.get("limitations"):
+        _h2("Limitations")
+        _body(report["limitations"])
+
+    # ── Appendices ───────────────────────────────────────────────────────────
+    appendices = report.get("appendices", {})
+    if appendices:
+        _h2("Appendices")
+        if appendices.get("methodology"):
+            _h3("Methodology")
+            _body(appendices["methodology"])
+        sources = appendices.get("data_sources", [])
+        if sources:
+            _h3("Data Sources")
+            for src in sources:
+                _bullet(src)
+        if appendices.get("definitions"):
+            _h3("Definitions")
+            _body(appendices["definitions"])
+
+    return bytes(pdf.output())
+
+
 def _render_business_report_tab() -> None:
     batch_results    = list(st.session_state.get("batch_analysis_results") or [])
     portfolio_result = st.session_state.get("portfolio_results") or {}
@@ -1091,64 +1266,10 @@ def _render_business_report_tab() -> None:
     # Download
     st.divider()
     st.subheader("Export Report")
-    
-    # JSON export
+
     json_data = json.dumps(report, indent=2, default=str)
-    
-    # Markdown export
-    md_lines = [
-        f"# {report.get('report_title', 'Ghost Capacity Investigation Report')}",
-        f"",
-        f"**{report.get('document_classification', 'FOR INFORMATION')}** | {report.get('ar_number', 'AR-2026-XXXX')} | {report.get('date', pd.Timestamp.now().date().isoformat())}",
-        f"Prepared by: {report.get('prepared_by', 'Policy Analysis Unit')}",
-        f"",
-        f"## Executive Summary",
-        f"",
-        report.get('executive_summary', 'N/A'),
-        f"",
-        f"## Situation Overview",
-        f"",
-    ]
-    
-    situation = report.get("situation_overview", {})
-    if situation:
-        md_lines.extend([
-            f"**Scope:** {situation.get('scope', 'N/A')}",
-            f"",
-            f"**Scale:** {situation.get('scale', 'N/A')}",
-            f"",
-            f"**Context:** {situation.get('context', 'N/A')}",
-            f"",
-        ])
-    
-    md_lines.append("## Key Findings\n")
-    for i, finding in enumerate(report.get("key_findings", []), 1):
-        md_lines.extend([
-            f"### Finding {i}: {finding.get('finding', 'N/A')}",
-            f"",
-            f"**Severity:** {finding.get('severity', 'N/A')}",
-            f"",
-            f"**Evidence:** {finding.get('evidence', 'N/A')}",
-            f"",
-            f"**Implications:** {finding.get('implications', 'N/A')}",
-            f"",
-        ])
-    
-    md_lines.append("## Recommendations\n")
-    for i, rec in enumerate(report.get("recommendations", []), 1):
-        md_lines.extend([
-            f"### Recommendation {i} ({rec.get('priority', 'N/A')})",
-            f"",
-            f"**Action:** {rec.get('recommendation', 'N/A')}",
-            f"",
-            f"**Rationale:** {rec.get('rationale', 'N/A')}",
-            f"",
-            f"**Expected Outcome:** {rec.get('expected_outcome', 'N/A')}",
-            f"",
-        ])
-    
-    md_content = "\n".join(md_lines)
-    
+    pdf_bytes = _generate_pdf_report(report)
+
     col1, col2 = st.columns(2)
     with col1:
         st.download_button(
@@ -1160,10 +1281,10 @@ def _render_business_report_tab() -> None:
         )
     with col2:
         st.download_button(
-            "Download Report (Markdown)",
-            data=md_content,
-            file_name="fundtrace-business-report.md",
-            mime="text/markdown",
+            "Download Report (PDF)",
+            data=pdf_bytes,
+            file_name="fundtrace-business-report.pdf",
+            mime="application/pdf",
             use_container_width=True,
         )
 

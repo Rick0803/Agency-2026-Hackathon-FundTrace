@@ -472,7 +472,9 @@ def _normalize_01(arr: np.ndarray) -> np.ndarray:
 
 def _prepare_features(df: pd.DataFrame, feature_cols: list) -> np.ndarray:
     """Fill NaN with 0, winsorize at 1st/99th percentile."""
-    X = df[feature_cols].fillna(0).to_numpy(dtype=float)
+    # np.array(...) guarantees a writable copy; to_numpy() can return a read-only
+    # view in pandas 2.0+ with Copy-on-Write semantics.
+    X = np.array(df[feature_cols].fillna(0), dtype=float)
     for j in range(X.shape[1]):
         p1, p99 = np.percentile(X[:, j], [1, 99])
         X[:, j] = np.clip(X[:, j], p1, p99)

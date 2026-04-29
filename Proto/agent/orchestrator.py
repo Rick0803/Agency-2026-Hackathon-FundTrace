@@ -39,6 +39,13 @@ from tools import retrieval, analytics
 from models.schemas import ToolResult, RiskBrief, RiskSignal
 
 
+def _money(value) -> str:
+    try:
+        return f"${float(value):,.0f}"
+    except (TypeError, ValueError):
+        return "-"
+
+
 # ─── Tool registry ─────────────────────────────────────────────────────────────
 
 TOOL_REGISTRY = {

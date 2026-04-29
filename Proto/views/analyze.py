@@ -57,58 +57,107 @@ def _build_summary_prompt(batch_results: list, portfolio_result: dict) -> str:
 
 def _llm_analysis_summary(batch_results: list, portfolio_result: dict) -> str:
     """
-    Returns a one-sentence plain-English summary of the analysis findings.
-    
-    Calls the LLM to generate a summary with deterministic fallback.
+    Returns a ~200-word executive paragraph summarising the analysis findings.
+    Calls the LLM with a deterministic fallback of equivalent length.
     """
     from agent.llm_client import call_llm
-    
-    # Build the prompt
+
     prompt = _build_summary_prompt(batch_results, portfolio_result)
-    
-    # Try LLM call
+
     llm_response = call_llm(
         system_prompt=(
             "You are a senior policy analyst briefing executive stakeholders on a ghost capacity investigation. "
-            "Ghost capacity = organizations consuming public funding without delivering services. "
-            "Write 3-4 sentences for executive decision-makers. Include: (1) the severity and scale of findings, "
-            "(2) the most concerning entity and why, (3) systemic patterns if any, "
-            "(4) recommended immediate action. Use authoritative language suitable for senior government officials. "
-            "Be concise, objective, and grounded in the provided data."
+            "Ghost capacity = organizations consuming public funding without demonstrable service delivery capacity. "
+            "Write exactly one paragraph of approximately 200 words for executive decision-makers. "
+            "The paragraph must cover: (1) the severity and scale of findings with specific numbers, "
+            "(2) the most concerning entity by name, its ghost score, and the two strongest risk signals, "
+            "(3) systemic patterns observed across the flagged set, "
+            "(4) the total federal funding exposure and funding gap, "
+            "(5) a clear recommended immediate action. "
+            "Use authoritative, plain language suitable for senior government officials. "
+            "Output the paragraph only — no headers, no bullet points, no preamble."
         ),
         user_prompt=prompt,
-        max_tokens=250,
+        max_tokens=400,
     )
-    
+
     if llm_response:
         return llm_response.strip()
-    
-    # Fallback to deterministic output
+
+    # Deterministic fallback — ~200 words
     total     = len(batch_results)
     critical  = sum(1 for r in batch_results if r.overall_risk == "CRITICAL")
     high      = sum(1 for r in batch_results if r.overall_risk == "HIGH")
+    medium    = sum(1 for r in batch_results if r.overall_risk == "MEDIUM")
     avg_score = sum(r.ghost_score for r in batch_results) / max(total, 1)
     top       = max(batch_results, key=lambda r: r.ghost_score) if batch_results else None
+    total_fed = sum(r.fed_total for r in batch_results)
+    total_gap = sum(r.funding_gap for r in batch_results)
 
-    if critical >= 1:
-        lead = f"{critical} of your {total} flagged organization{'s' if total > 1 else ''} show CRITICAL ghost capacity signals"
-    elif high >= 1:
-        lead = f"{high} of your {total} flagged organization{'s' if total > 1 else ''} show HIGH-risk ghost capacity signals"
-    else:
-        lead = f"All {total} flagged organization{'s' if total > 1 else ''} score below the high-risk threshold"
-
+    top_detail = ""
     if top:
-        tail = f", with {top.canonical_name} carrying the strongest risk at a ghost score of {top.ghost_score:.2f}."
-    else:
-        tail = "."
+        top_flags_str = (
+            " and ".join(top.top_flags[:2]) if top.top_flags else "multiple ghost capacity indicators"
+        )
+        top_detail = (
+            f" The highest-risk entity, {top.canonical_name}, carries a ghost score of "
+            f"{top.ghost_score:.2f} and exhibits {top_flags_str}."
+        )
 
-    return lead + tail
+    if critical + high >= 3:
+        systemic = (
+            f" The concentration of {critical + high} elevated-risk entities within this set "
+            f"suggests systemic oversight gaps rather than isolated cases, "
+            f"warranting a coordinated, portfolio-level review response."
+        )
+    elif critical + high >= 1:
+        systemic = (
+            f" The presence of {critical + high} elevated-risk "
+            f"{'entity' if critical + high == 1 else 'entities'} "
+            f"warrants targeted follow-up before the next funding cycle."
+        )
+    else:
+        systemic = (
+            " No entities breached the HIGH or CRITICAL threshold; "
+            "standard monitoring protocols remain appropriate."
+        )
+
+    if critical > 0:
+        action = (
+            f"Immediate suspension or conditional review of the {critical} CRITICAL-rated "
+            f"{'organization is' if critical == 1 else 'organizations are'} recommended, "
+            f"alongside enhanced monitoring and documentary verification for all HIGH-risk recipients "
+            f"prior to any further disbursement."
+        )
+    elif high > 0:
+        action = (
+            f"Enhanced monitoring and documentary verification are recommended for the {high} HIGH-risk "
+            f"{'recipient' if high == 1 else 'recipients'} prior to funding renewal."
+        )
+    else:
+        action = (
+            "Continued standard monitoring is appropriate, "
+            "with periodic re-assessment as new CRA filings become available."
+        )
+
+    return (
+        f"This investigation analyzed {total} organizations flagged for potential ghost capacity — "
+        f"entities that receive public funding without demonstrable service delivery capacity — "
+        f"and identified {critical} CRITICAL-risk, {high} HIGH-risk, and {medium} MEDIUM-risk entities, "
+        f"with an average ghost score of {avg_score:.2f} across the portfolio.{top_detail} "
+        f"Combined federal funding exposure totals ${total_fed:,.0f}, "
+        f"with a cumulative funding gap of ${total_gap:,.0f} between grants received and "
+        f"CRA-reported program expenditures — a key indicator of potential capacity misalignment.{systemic} "
+        f"{action}"
+    )
 
 
 def _render_analysis_summary_block(batch_results: list, portfolio_result: dict) -> None:
     summary = _llm_analysis_summary(batch_results, portfolio_result)
     prompt = _build_summary_prompt(batch_results, portfolio_result)
-    st.info(f"**Analysis Summary** — {summary}")
+    with st.container(border=True):
+        st.markdown("**Executive Analysis Summary**")
+        st.write(summary)
     st.session_state["analysis_summary_prompt"] = prompt
 
 
@@ -382,6 +431,7 @@ def _render_combined_analysis(batch_results: list, portfolio_result: dict) -> No
                      key="combined_continue_report"):
             _set_default_report_entity(batch_results)
             go_to_page("Report")
+            st.rerun()
     with rerun_col:
         if st.button("Re-run Analysis", use_container_width=True, key="combined_rerun"):
             st.session_state.pop("batch_analysis_results", None)
