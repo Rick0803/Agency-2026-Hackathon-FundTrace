@@ -296,30 +296,12 @@ known organization in the entity registry — these are typically malformed or m
     )
     st.markdown("<div style='height: 0.75rem;'></div>", unsafe_allow_html=True)
 
-    if "fetch_active_method" not in st.session_state:
-        st.session_state["fetch_active_method"] = "User-Defined Rules"
+    tab_rules, tab_anomaly = st.tabs(["User-Defined Rules", "Anomaly Detection (AI)"])
 
-    st.markdown(
-        "<style>"
-        "div[data-testid='stRadio'] label {"
-        "  font-size: 1.15rem !important;"
-        "  font-weight: 700 !important;"
-        "  letter-spacing: 0.01em;"
-        "}"
-        "</style>",
-        unsafe_allow_html=True,
-    )
-    active_method = st.radio(
-        "Scan Method",
-        options=["User-Defined Rules", "Anomaly Detection (AI)"],
-        horizontal=True,
-        label_visibility="collapsed",
-        key="fetch_active_method",
-    )
-
-    if active_method == "User-Defined Rules":
+    with tab_rules:
         _render_way1()
-    else:
+
+    with tab_anomaly:
         _render_way2()
 
     latest_flagged_count = len(st.session_state.get("flagged_list", []))
