@@ -522,15 +522,26 @@ Rules:
 
 
 BUSINESS_REPORT_SYSTEM_PROMPT = """
-You are a federal funding risk analyst writing a business report for a non-technical government audience.
+You are a Senior Executive Policy Analyst for the Government of Alberta.
 Use ONLY the data provided. Do not invent numbers or facts.
-Write in plain English. Be direct and specific.
+Write in plain language. Be concise, objective, and politically neutral.
+Focus on impacts, risks, and actionable recommendations.
 Return JSON only with this exact shape:
 {
-  "executive_summary": "2-3 sentences: what was reviewed, the headline finding, the single most urgent action",
-  "recommended_actions": ["action 1", "action 2", "action 3"]
+  "document_classification": "FOR INFORMATION|ADVICE TO MINISTER|CONFIDENTIAL",
+  "ar_number": "AR-2026-XXXX",
+  "topic": "1-2 line title",
+  "purpose": "FOR INFORMATION|BACKGROUNDER|DECISION REQUIRED",
+  "issue": "1-2 sentence issue statement",
+  "recommendation_advice": ["bullet 1", "bullet 2"],
+  "background": ["bullet 1", "bullet 2"],
+  "current_status_key_considerations": ["bullet 1", "bullet 2", "bullet 3"],
+  "communications": ["bullet 1"],
+  "attachments": ["attachment 1"],
+  "contact": "placeholder or provided contact",
+  "reviewed_approved_by": "placeholder or provided approver"
 }
-Recommended actions must be specific and prioritised — name the highest-risk entity in action 1.
+If a section cannot be supported from the data, return "N/A based on provided data." for that field or as the only bullet in that section.
 """.strip()
 
 
@@ -571,9 +582,8 @@ def _build_report_context(batch_results: list, portfolio_result: dict) -> dict:
 
 def run_business_report(batch_results: list, portfolio_result: dict) -> dict:
     """
-    Returns the two LLM-written sections of the business report:
-      - executive_summary (str)
-      - recommended_actions (list[str])
+    Returns a placeholder executive briefing note payload matching the
+    future LLM-ready structure for macro reporting.
 
     STUB — deterministic output until API credentials are available.
     To activate the LLM, replace the body below with:
@@ -593,51 +603,79 @@ def run_business_report(batch_results: list, portfolio_result: dict) -> dict:
     high      = sum(1 for r in batch_results if r.overall_risk == "HIGH")
     top       = max(batch_results, key=lambda r: r.ghost_score) if batch_results else None
     total_gap = sum(r.funding_gap for r in batch_results)
+    total_fed = sum(r.fed_total for r in batch_results)
+    top_name = top.canonical_name if top else "N/A based on provided data."
+    purpose = "FOR INFORMATION"
+
+    if critical or high:
+        topic = "Risk review of shortlisted public-funding recipients with elevated ghost-capacity indicators"
+    else:
+        topic = "Summary of shortlisted public-funding recipient review"
 
     if critical:
-        headline = f"{critical} of {total} reviewed organization{'s' if total > 1 else ''} reached CRITICAL ghost capacity status"
+        issue = (
+            f"{critical} of {total} reviewed organization{'s' if total > 1 else ''} "
+            "show CRITICAL ghost-capacity indicators based on the provided analysis."
+        )
     elif high:
-        headline = f"{high} of {total} reviewed organization{'s' if total > 1 else ''} show HIGH-risk ghost capacity patterns"
+        issue = (
+            f"{high} of {total} reviewed organization{'s' if total > 1 else ''} "
+            "show HIGH-risk ghost-capacity patterns based on the provided analysis."
+        )
     else:
-        headline = f"All {total} reviewed organization{'s' if total > 1 else ''} score below the high-risk threshold"
+        issue = (
+            f"The reviewed set of {total} organization{'s' if total > 1 else ''} "
+            "does not currently cross the high-risk threshold based on the provided analysis."
+        )
 
-    top_line = (
-        f" {top.canonical_name} carries the strongest signal at a ghost score of {top.ghost_score:.2f}."
-        if top else ""
-    )
-    gap_line = (
-        f" Combined federal funding gap is ${total_gap:,.0f}."
-        if total_gap > 0 else ""
-    )
-    executive_summary = (
-        headline + "." + top_line + gap_line
-        + " Immediate review is recommended for all CRITICAL and HIGH-rated entities."
-    )
+    if critical or high:
+        recommendation_advice = [
+            f"Prioritize follow-up review of {top_name} as the highest-risk entity in the analyzed set.",
+            "Review CRITICAL and HIGH-rated entities before the next funding decision point.",
+        ]
+    else:
+        recommendation_advice = ["None required - For information only."]
 
-    actions = []
-    if top:
-        actions.append(
-            f"Prioritize audit of {top.canonical_name} (ghost score {top.ghost_score:.2f})"
-            " — request program delivery evidence and employee records."
-        )
-    if total_gap > 0:
-        actions.append(
-            f"Investigate ${total_gap:,.0f} funding gap: federal disbursements exceed"
-            " reported program spend across the reviewed set."
-        )
-    if critical + high > 1:
-        actions.append(
-            f"Refer {critical + high} CRITICAL/HIGH entities to program officers"
-            " for eligibility re-verification before the next funding cycle."
-        )
-    actions.append(
-        "Cross-reference flagged entities against CRA charity revocation lists"
-        " and recent T3010 filings."
-    )
+    background = [
+        f"A total of {total} shortlisted organization{'s' if total > 1 else ''} were analyzed using linked CRA and federal funding records.",
+        f"The analysis considered ghost score, risk indicators, funding exposure, and filing-related signals using the provided data.",
+    ]
+
+    current_status = [
+        f"{critical} entity(ies) are rated CRITICAL and {high} entity(ies) are rated HIGH in the current review set.",
+        f"Total federal funding across the reviewed set is ${total_fed:,.0f}.",
+        (
+            f"Combined funding gap across the reviewed set is ${total_gap:,.0f}."
+            if total_gap > 0 else "No positive combined funding gap was identified in the reviewed set."
+        ),
+        (
+            f"{top_name} is currently the highest-risk organization based on ghost score."
+            if top else "N/A based on provided data."
+        ),
+    ]
+
+    communications = [
+        "None identified."
+    ]
+
+    attachments = [
+        "Entity analysis dashboard export",
+        "Aggregate risk dashboard export",
+    ]
 
     return {
-        "executive_summary":   executive_summary,
-        "recommended_actions": actions[:4],
+        "document_classification": "FOR INFORMATION",
+        "ar_number": "AR-2026-XXXX",
+        "topic": topic,
+        "purpose": purpose,
+        "issue": issue,
+        "recommendation_advice": recommendation_advice,
+        "background": background,
+        "current_status_key_considerations": current_status,
+        "communications": communications,
+        "attachments": attachments,
+        "contact": "N/A based on provided data.",
+        "reviewed_approved_by": "N/A based on provided data.",
     }
 
 
@@ -1015,18 +1053,22 @@ def run_analysis(user_query: str, max_iterations: int = 25) -> dict:
 
 # ─── Deterministic analysis (no LLM) ──────────────────────────────────────────
 
-def run_single_entity_analysis(entity_dict: dict):
+@lru_cache(maxsize=256)
+def _run_single_entity_analysis_cached(
+    bn: str,
+    entity_name: str,
+    entity_type: str,
+    province: str,
+    fed_total: float,
+    rules_triggered: int,
+):
     """
-    Takes one dict from flagged_list (canonical_name, bn_root, entity_type,
-    province, fed_total, rules_triggered). Fetches all 5 data sources and calls
-    analytics.analyze_entity_from_data. Returns EntityAnalysisResult.
+    Cached single-entity analysis for the Analyze step.
+
+    Keyed by stable entity attributes so repeated elevation of the same shortlist
+    can reuse prior work instead of refetching all five data sources.
     """
     from models.schemas import EntityAnalysisResult
-
-    bn           = entity_dict.get("bn_root", "")
-    entity_name  = entity_dict.get("canonical_name", "")
-    entity_type  = entity_dict.get("entity_type", "")
-    province     = entity_dict.get("province", "")
 
     try:
         revenue_df   = retrieval.fetch_cra_revenue_sources(bn)
@@ -1054,13 +1096,13 @@ def run_single_entity_analysis(entity_dict: dict):
             province            = province,
             ghost_score         = 0.0,
             anomaly_score       = 0.0,
-            rules_triggered     = int(entity_dict.get("rules_triggered", 0)),
+            rules_triggered     = int(rules_triggered),
             overall_risk        = "HIGH",
             confidence          = "Low",
             signals             = [],
             explanation         = "Data retrieval failed.",
             top_flags           = [],
-            fed_total           = float(entity_dict.get("fed_total", 0)),
+            fed_total           = float(fed_total),
             funding_gap         = 0.0,
             avg_gov_dependency  = 0.0,
             avg_program_ratio   = 0.0,
@@ -1076,6 +1118,22 @@ def run_single_entity_analysis(entity_dict: dict):
             has_fed_data        = False,
             analysis_notes      = str(e),
         )
+
+
+def run_single_entity_analysis(entity_dict: dict):
+    """
+    Takes one dict from flagged_list (canonical_name, bn_root, entity_type,
+    province, fed_total, rules_triggered). Fetches all 5 data sources and calls
+    analytics.analyze_entity_from_data. Returns EntityAnalysisResult.
+    """
+    return _run_single_entity_analysis_cached(
+        str(entity_dict.get("bn_root", "")),
+        str(entity_dict.get("canonical_name", "")),
+        str(entity_dict.get("entity_type", "")),
+        str(entity_dict.get("province", "")),
+        float(entity_dict.get("fed_total", 0) or 0),
+        int(entity_dict.get("rules_triggered", 0) or 0),
+    )
 
 
 def run_entity_batch_analysis(flagged_list: list) -> list:

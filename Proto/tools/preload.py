@@ -14,6 +14,7 @@ _STATE: dict[str, Any] = {
     "error": "",
     "started_at": None,
     "finished_at": None,
+    "shortlist_started": set(),
 }
 
 
@@ -63,3 +64,39 @@ def start_fetch_preload() -> None:
 def fetch_preload_status() -> dict[str, Any]:
     with _LOCK:
         return dict(_STATE)
+
+
+def _warm_shortlist_analysis_worker(flagged_list: list[dict]) -> None:
+    from agent.orchestrator import run_entity_batch_analysis
+
+    try:
+        run_entity_batch_analysis(flagged_list)
+    except Exception:
+        # This is only a background warmup; foreground analysis will surface
+        # real errors to the user if a specific entity fails.
+        return
+
+
+def start_shortlist_analysis_preload(flagged_list: list[dict]) -> None:
+    """
+    Warm the current shortlist analysis in the background while the user is on
+    page 2, so the Elevate click lands on a mostly ready Analyze page.
+    """
+    shortlist = [row for row in flagged_list if row.get("bn_root")]
+    if not shortlist:
+        return
+
+    signature = tuple(row.get("bn_root", "") for row in shortlist)
+    with _LOCK:
+        started = _STATE.setdefault("shortlist_started", set())
+        if signature in started:
+            return
+        started.add(signature)
+
+    thread = threading.Thread(
+        target=_warm_shortlist_analysis_worker,
+        args=(shortlist,),
+        name="shortlist-analysis-preload",
+        daemon=True,
+    )
+    thread.start()

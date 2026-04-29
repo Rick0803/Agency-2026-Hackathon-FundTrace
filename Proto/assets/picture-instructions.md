@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This image appears on the ZombieTrace home page to explain the 4-step investigation workflow at a glance. It should communicate the full story: where the data comes from, what happens at each step, and what comes out the other end.
+This image appears on the FundTrace home page to explain the 4-step investigation workflow at a glance. It should communicate the full story: where the data comes from, what happens at each step, and what comes out the other end.
 
 ## Overall Layout
 
@@ -99,6 +99,6 @@ Professional and investigative — this is a government accountability tool. Avo
 ## What to Avoid
 
 - Generic icons that could apply to any app (avoid shopping carts, people icons, smiley faces)
-- Showing the word "ZombieTrace" in the illustration itself (the title is already above it on the page)
+- Showing the word "FundTrace" in the illustration itself (the title is already above it on the page)
 - More than 3 lines of text per card — keep it scannable
 - Dark backgrounds — the app uses a light theme

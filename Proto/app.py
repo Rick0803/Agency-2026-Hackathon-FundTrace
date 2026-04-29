@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import streamlit as st
 
 from views import general, fetch, analyze, report
@@ -11,7 +13,9 @@ PAGE_OPTIONS = [
     "Report",
 ]
 
-st.set_page_config(page_title="ZombieTrace", layout="wide")
+st.set_page_config(page_title="FundTrace", layout="wide")
+
+SIDEBAR_ICON_PATH = Path(__file__).resolve().parent / "Gemini_Generated_Icon.png"
 
 general.init_session_state()
 general.enforce_workflow_page()
@@ -27,7 +31,12 @@ if "portfolio_cache_warmed" not in st.session_state:
         pass
 
 with st.sidebar:
-    st.title("ZombieTrace")
+    if SIDEBAR_ICON_PATH.exists():
+        st.image(str(SIDEBAR_ICON_PATH), width=132)
+    st.markdown(
+        "<div style='margin-top:-0.5rem; margin-bottom:0.15rem; font-size:2rem; font-weight:700;'>FundTrace</div>",
+        unsafe_allow_html=True,
+    )
     st.caption("Track public funding. Surface ghost recipients.")
     st.divider()
     st.markdown(
@@ -38,23 +47,34 @@ with st.sidebar:
         button_type = "primary" if st.session_state["page"] == option else "secondary"
         disabled = not general.page_available(option)
         label = general.workflow_status_label(option)
-        st.button(
+        if st.button(
             label,
             type=button_type,
             use_container_width=True,
             disabled=disabled,
-            on_click=general.go_to_page,
-            args=(option,),
-        )
+            key=f"sidebar_nav_{option.lower()}",
+        ):
+            general.go_to_page(option)
+            st.rerun()
     st.caption("Greyed-out buttons mean you are not there yet. Complete the current page first.")
     st.divider()
-    st.button(
+    if st.button(
+        "Start Over",
+        type="secondary",
+        use_container_width=True,
+        key="sidebar_start_over",
+    ):
+        general.reset_workflow()
+        st.rerun()
+    st.divider()
+    if st.button(
         "About This Tool",
         type="primary" if st.session_state["page"] == "Zombie Context" else "secondary",
         use_container_width=True,
-        on_click=general.go_to_page,
-        args=("Zombie Context",),
-    )
+        key="sidebar_about_tool",
+    ):
+        general.go_to_page("Zombie Context")
+        st.rerun()
 
 page = st.session_state["page"]
 general.render_workflow_notice()
@@ -71,3 +91,5 @@ elif page == "Report":
     report.render_report()
 elif page == "Zombie Context":
     general.render_zombie_context()
+
+general.render_scroll_to_top()

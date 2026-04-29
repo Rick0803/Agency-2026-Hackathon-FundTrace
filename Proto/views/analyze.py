@@ -92,6 +92,14 @@ def _llm_analysis_summary(batch_results: list, portfolio_result: dict) -> str:
     return lead + tail
 
 
+def _render_analysis_summary_block(batch_results: list, portfolio_result: dict) -> None:
+    summary = _llm_analysis_summary(batch_results, portfolio_result)
+    prompt = _build_summary_prompt(batch_results, portfolio_result)
+    st.info(f"**Analysis Summary** — {summary}")
+    st.caption("Placeholder for a future LLM-generated portfolio summary.")
+    st.session_state["analysis_summary_prompt"] = prompt
+
+
 # ─── Chart helper ─────────────────────────────────────────────────────────────
 
 def _labeled_bar_chart(df: pd.DataFrame, x_col: str, y_col: str,
@@ -189,7 +197,7 @@ def _fmt_dollar(df: pd.DataFrame, cols: list) -> pd.DataFrame:
 # ─── Public entry point ────────────────────────────────────────────────────────
 
 def render_analyze() -> None:
-    st.title("ZombieTrace")
+    st.title("FundTrace")
     st.subheader("Analysis")
 
     flagged: list = st.session_state.get("flagged_list", [])
@@ -220,8 +228,7 @@ def _render_combined_analysis(batch_results: list, portfolio_result: dict) -> No
     total_ents = portfolio_result.get("total_entities", 0)
 
     # ── AI summary (stub — replace with LLM call when credentials are ready) ──
-    summary = _llm_analysis_summary(batch_results, portfolio_result)
-    st.info(f"**Analysis Summary** — {summary}")
+    _render_analysis_summary_block(batch_results, portfolio_result)
 
     # ── Section 1: Your flagged entities ──────────────────────────────────────
     st.subheader("Your Flagged Entities")

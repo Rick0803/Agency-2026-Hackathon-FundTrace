@@ -5,6 +5,7 @@
 import json
 from pathlib import Path
 import streamlit as st
+import streamlit.components.v1 as components
 import pandas as pd
 
 from agent.orchestrator import (
@@ -21,7 +22,7 @@ SEVERITY_COLOUR = {
 
 CORE_DATASETS = {"cra", "fed"}
 WORKFLOW_STEPS = ["Fetch", "Flagged", "Analyze", "Report"]
-WORKFLOW_IMAGE_PATH = Path(__file__).resolve().parents[1] / "assets" / "workflow-illustration.png"
+HOME_IMAGE_PATH = Path(__file__).resolve().parents[2] / "FED" / "image" / "CLAUDE" / "HomePageIcon.png"
 
 
 # ─── Session state ─────────────────────────────────────────────────────────────
@@ -33,14 +34,22 @@ def init_session_state() -> None:
         st.session_state["selected_entity"] = {}
     if "flagged_list" not in st.session_state:
         st.session_state["flagged_list"] = []
+    if "analysis_unlocked" not in st.session_state:
+        st.session_state["analysis_unlocked"] = False
     if "workflow_notice" not in st.session_state:
         st.session_state["workflow_notice"] = ""
+    if "scroll_to_top" not in st.session_state:
+        st.session_state["scroll_to_top"] = False
 
 
 # ─── Navigation ────────────────────────────────────────────────────────────────
 
 def has_flagged_entities() -> bool:
     return bool(st.session_state.get("flagged_list"))
+
+
+def analysis_unlocked() -> bool:
+    return bool(st.session_state.get("analysis_unlocked"))
 
 
 def has_analysis_results() -> bool:
@@ -63,19 +72,51 @@ def clear_downstream_results() -> None:
         st.session_state.pop(key, None)
 
 
+def reset_workflow() -> None:
+    clear_downstream_results()
+    for key in (
+        "selected_entity",
+        "flagged_list",
+        "business_report",
+        "fetch_active_method",
+    ):
+        st.session_state.pop(key, None)
+
+    st.session_state["selected_entity"] = {}
+    st.session_state["flagged_list"] = []
+    st.session_state["analysis_unlocked"] = False
+    st.session_state["workflow_notice"] = ""
+    st.session_state["page"] = "Home"
+    st.session_state["scroll_to_top"] = True
+
+
+def lock_analysis_step() -> None:
+    st.session_state["analysis_unlocked"] = False
+
+
+def unlock_analysis_step() -> None:
+    st.session_state["analysis_unlocked"] = True
+
+
 def page_available(page: str) -> bool:
     if page in ("Home", "Fetch"):
         return True
-    if page in ("Flagged", "Analyze"):
+    if page == "Flagged":
         return has_flagged_entities()
+    if page == "Analyze":
+        return has_flagged_entities() and analysis_unlocked()
     if page == "Report":
         return has_analysis_results()
     return True
 
 
 def page_prerequisite(page: str) -> str:
-    if page in ("Flagged", "Analyze"):
+    if page == "Flagged":
         return "Add at least one organization to the Flagged List in Fetch first."
+    if page == "Analyze":
+        if not has_flagged_entities():
+            return "Add at least one organization to the Flagged List in Fetch first."
+        return "Use page 2 to elevate your shortlisted entities before running analysis."
     if page == "Report":
         return ""
     return ""
@@ -83,8 +124,12 @@ def page_prerequisite(page: str) -> str:
 
 def fallback_page_for(page: str) -> str:
     if page == "Report":
-        return "Analyze" if has_flagged_entities() else "Fetch"
-    if page in ("Flagged", "Analyze"):
+        if analysis_unlocked():
+            return "Analyze"
+        return "Flagged" if has_flagged_entities() else "Fetch"
+    if page == "Analyze":
+        return "Flagged" if has_flagged_entities() else "Fetch"
+    if page == "Flagged":
         return "Fetch"
     return "Home"
 
@@ -93,10 +138,12 @@ def go_to_page(page: str) -> None:
     if page_available(page):
         st.session_state["page"] = page
         st.session_state["workflow_notice"] = ""
+        st.session_state["scroll_to_top"] = True
         return
 
     st.session_state["page"] = fallback_page_for(page)
     st.session_state["workflow_notice"] = page_prerequisite(page)
+    st.session_state["scroll_to_top"] = True
 
 
 def enforce_workflow_page() -> None:
@@ -105,6 +152,7 @@ def enforce_workflow_page() -> None:
         return
     st.session_state["page"] = fallback_page_for(page)
     st.session_state["workflow_notice"] = page_prerequisite(page)
+    st.session_state["scroll_to_top"] = True
 
 
 def render_workflow_notice() -> None:
@@ -112,6 +160,24 @@ def render_workflow_notice() -> None:
     if notice:
         st.warning(notice)
         st.session_state["workflow_notice"] = ""
+
+
+def render_scroll_to_top() -> None:
+    if not st.session_state.get("scroll_to_top"):
+        return
+    components.html(
+        """
+        <script>
+        window.parent.scrollTo({ top: 0, behavior: "instant" });
+        const main = window.parent.document.querySelector('section.main');
+        if (main) {
+          main.scrollTo({ top: 0, behavior: "instant" });
+        }
+        </script>
+        """,
+        height=0,
+    )
+    st.session_state["scroll_to_top"] = False
 
 
 def workflow_status_label(page: str) -> str:
@@ -339,7 +405,7 @@ Use these terms in your request to get cleaner results.
 # ─── Home page ─────────────────────────────────────────────────────────────────
 
 def render_home() -> None:
-    st.title("ZombieTrace")
+    st.title("FundTrace")
     st.caption("Find Canadian organizations collecting public money with nothing to show for it.")
     st.divider()
 
@@ -349,13 +415,13 @@ def render_home() -> None:
         "Most organizations use that funding responsibly — but some show patterns that raise questions: "
         "no employees, near-zero program spending, revenue almost entirely from government, "
         "and federal disbursements that far exceed what CRA filings show was spent on delivery. "
-        "ZombieTrace connects federal grants records with CRA charity filings to surface those patterns "
+        "FundTrace connects federal grants records with CRA charity filings to surface those patterns "
         "and turn them into evidence-ready findings."
     )
 
     st.subheader("How it works")
-    if WORKFLOW_IMAGE_PATH.exists():
-        st.image(str(WORKFLOW_IMAGE_PATH), use_container_width=True)
+    if HOME_IMAGE_PATH.exists():
+        st.image(str(HOME_IMAGE_PATH), use_container_width=True)
     st.write(
         "The workflow is intentionally linear. Search for candidate organizations, build a shortlist, "
         "run the analysis, then export a report. Each step stays locked until the previous one is complete "
@@ -372,7 +438,7 @@ def render_home() -> None:
 
     st.divider()
 
-    st.subheader("Why ZombieTrace is different")
+    st.subheader("Why FundTrace is Different")
     impact_cols = st.columns(4)
     impact_cols[0].markdown("**Connects Siloed Data**")
     impact_cols[0].markdown("Links **federal grants** and **CRA charity filings** that are never published together — surfacing patterns invisible in either dataset alone.")
@@ -399,7 +465,7 @@ def render_home() -> None:
 # ─── Zombie recipient context page ────────────────────────────────────────────
 
 def render_zombie_context() -> None:
-    st.title("About ZombieTrace")
+    st.title("About FundTrace")
     st.caption("The problem we're solving and how the tool approaches it.")
     st.divider()
 
@@ -413,7 +479,7 @@ def render_zombie_context() -> None:
         "They remain registered, keep receiving money, and leave little public trace of delivery."
     )
     st.write(
-        "The label is a triage signal, not a verdict. ZombieTrace surfaces organizations where the public "
+        "The label is a triage signal, not a verdict. FundTrace surfaces organizations where the public "
         "record raises questions worth investigating — it leaves the conclusion to human reviewers with access "
         "to context the data alone cannot provide."
     )
@@ -426,7 +492,7 @@ def render_zombie_context() -> None:
         "Ghost capacity patterns only become visible when those datasets are linked and compared at scale."
     )
 
-    st.subheader("How ZombieTrace works")
+    st.subheader("How FundTrace Works")
     st.write(
         "The tool guides reviewers through a structured four-step workflow: search for candidate organizations, "
         "build a shortlist based on judgment and signals, run deterministic risk scoring, and export findings "
@@ -442,7 +508,7 @@ def render_zombie_context() -> None:
 
 def render_open_search(show_header: bool = True) -> None:
     if show_header:
-        st.title("ZombieTrace")
+        st.title("FundTrace")
         st.subheader("Open Search — Natural language CRA/FED search")
         st.caption("Ask for ranked tables such as top transfers out, zero-employee funded orgs, or likely ghost-capacity candidates.")
 

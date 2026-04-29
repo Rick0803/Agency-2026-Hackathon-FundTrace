@@ -4,6 +4,7 @@
 import time
 import streamlit as st
 import pandas as pd
+from tools.preload import start_shortlist_analysis_preload
 
 from agent.orchestrator import (
     run_fetch,
@@ -17,7 +18,9 @@ from agent.orchestrator import (
 from views.general import (
     clear_downstream_results,
     go_to_page,
+    lock_analysis_step,
     set_selected_entity,
+    unlock_analysis_step,
     render_selected_entity_banner,
     render_open_search,
     format_sources,
@@ -75,6 +78,74 @@ def format_picker_df(df: pd.DataFrame) -> pd.DataFrame:
         "Province":     df.apply(lambda row: location_value(row, "province"), axis=1),
         "Postal code":  df.apply(lambda row: location_value(row, "postal_code"), axis=1),
     })
+
+
+# ─── LLM-ready scan summary placeholders ──────────────────────────────────────
+
+def _build_fetch_summary_prompt(
+    method_name: str,
+    coverage: dict,
+    top_rows: list[dict],
+    breakdown_rows: list[dict],
+) -> str:
+    return (
+        f"You are an analyst summarizing a {method_name} scan for suspicious public-funding recipients. "
+        f"Coverage: {coverage}. "
+        f"Top results: {top_rows}. "
+        f"Breakdown: {breakdown_rows}. "
+        "Write 2 short sentences for a non-technical reviewer. Mention scale, the strongest pattern, "
+        "and what should be reviewed next. Do not invent numbers."
+    )
+
+
+def _fetch_scan_summary_placeholder(
+    method_name: str,
+    coverage: dict,
+    top_rows: list[dict],
+    breakdown_rows: list[dict],
+) -> str:
+    """
+    Deterministic placeholder for a future LLM scan summary.
+
+    Replace the body with a real model call later, but keep the signature and
+    structured inputs stable so the UI does not need to change.
+    """
+    flagged = int(coverage.get("flagged_entities", 0))
+    scanned = int(coverage.get("entities_scanned", 0))
+    shown = int(coverage.get("shown_entities", flagged))
+    lead = f"{method_name} reviewed {scanned:,} entities and surfaced {flagged:,} candidates."
+    if not top_rows:
+        return lead + " No standout review targets were returned."
+
+    top_name = top_rows[0].get("Organization") or top_rows[0].get("canonical_name") or "the top-ranked entity"
+    if method_name == "User-Defined Rules":
+        rules = top_rows[0].get("Rules triggered", top_rows[0].get("rules_triggered", 0))
+        return (
+            f"{lead} The strongest current lead is {top_name}, which sits at the top of the shortlist "
+            f"with {rules} triggered rules. Review the highest-frequency rule patterns first before "
+            f"moving the top {min(shown, 5)} entities into analysis."
+        )
+
+    score = top_rows[0].get("Anomaly score", top_rows[0].get("anomaly_score", 0))
+    return (
+        f"{lead} The most unusual current lead is {top_name}, which ranks first by anomaly score "
+        f"at {float(score):.3f}. Start with the top anomalies that also carry multiple rule signals, "
+        f"then move the strongest {min(shown, 5)} into analysis."
+    )
+
+
+def _render_fetch_summary_advisor(
+    method_name: str,
+    coverage: dict,
+    top_rows: list[dict],
+    breakdown_rows: list[dict],
+) -> None:
+    summary = _fetch_scan_summary_placeholder(method_name, coverage, top_rows, breakdown_rows)
+    prompt = _build_fetch_summary_prompt(method_name, coverage, top_rows, breakdown_rows)
+    with st.expander("AI Summary", expanded=True):
+        st.info(summary)
+        st.caption("Placeholder for a future LLM-generated scan summary.")
+        st.session_state[f"{method_name}_scan_summary_prompt"] = prompt
 
 
 # ─── Fetch summary (Way 4 raw data) ───────────────────────────────────────────
@@ -168,23 +239,22 @@ def render_fetch_summary(data: dict) -> None:
 # ─── Fetch page ────────────────────────────────────────────────────────────────
 
 def render_fetch() -> None:
-    st.title("ZombieTrace")
-    st.subheader("Fetch Mode — Zombie Recipient Detection")
-    st.caption("Four approaches to fetch and mark suspicious entities in public funding data.")
+    st.title("FundTrace")
+    st.subheader("Searching Potential Zombies")
 
     flagged_count = len(st.session_state.get("flagged_list", []))
     if flagged_count:
         next_col, _ = st.columns([1, 3])
         with next_col:
             st.button(
-                f"Continue to Flagged ({flagged_count})",
+                "Continue to Shortlist",
                 type="primary",
                 use_container_width=True,
                 on_click=go_to_page,
                 args=("Flagged",),
             )
 
-    with st.expander("About the data", expanded=False):
+    with st.expander("About The Data", expanded=True):
         st.markdown(
             """
 **The FED grants dataset has 1.275M rows — but only ~140K unique organizations.**
@@ -198,20 +268,41 @@ known organization in the entity registry — these are typically malformed or m
             """
         )
 
+    st.markdown("<div style='height: 0.75rem;'></div>", unsafe_allow_html=True)
     st.write(
-        "Use one of the methods below to fetch records and mark suspicious entities for further review."
+        "Use the methods below to fetch records and mark suspicious entities for further review."
+    )
+    st.markdown("<div style='height: 0.75rem;'></div>", unsafe_allow_html=True)
+
+    if "fetch_active_method" not in st.session_state:
+        st.session_state["fetch_active_method"] = "User-Defined Rules"
+
+    active_method = st.radio(
+        "Scan Method",
+        options=["User-Defined Rules", "Anomaly Detection (AI)"],
+        horizontal=True,
+        label_visibility="collapsed",
+        key="fetch_active_method",
     )
 
-    way1, way2 = st.tabs([
-        "User-Defined Rules",
-        "Anomaly Detection (AI)",
-    ])
-
-    with way1:
+    if active_method == "User-Defined Rules":
         _render_way1()
-
-    with way2:
+    else:
         _render_way2()
+
+    latest_flagged_count = len(st.session_state.get("flagged_list", []))
+    if latest_flagged_count:
+        st.divider()
+        next_page_col, _ = st.columns([1, 2])
+        with next_page_col:
+            st.button(
+                "Proceed to Review Shortlist",
+                type="primary",
+                use_container_width=True,
+                on_click=go_to_page,
+                args=("Flagged",),
+                key="fetch_proceed_to_flagged_bottom",
+            )
 
     # Hackathon scope: keep these Way 1 tabs in the codebase, but hide them
     # from the active UI for now.
@@ -229,67 +320,66 @@ known organization in the entity registry — these are typically malformed or m
 
 def _render_way1() -> None:
     st.subheader("User-Defined Rules")
-    st.caption("Flags recipients using hard heuristic rules. No LLM used.")
     st.markdown(
         "This method turns domain knowledge into **10 configurable rules** for spotting suspicious "
         "funding and filing patterns. Users can adjust key thresholds before running the scan, so the "
         "rules reflect the review context rather than a fixed black-box setting."
     )
 
-    with st.expander("How the rules work", expanded=True):
+    with st.expander("The 10 Rules", expanded=True):
         st.markdown(
             """
 **Zombie recipients** are organizations that received public funding but show signs of having
 ceased operations or never meaningfully delivered on that funding.
 
-| # | Rule | Flag |
-|---|------|------|
-| 1 | **Ceased operations** — last CRA T3010 filing was 2022 or earlier (2+ years before the 2024 dataset cutoff), indicating the org has gone dark | `flag_ceased` |
-| 2 | **Stopped filing ≤12mo after last grant** — last CRA T3010 filing falls within one year after last federal grant | `flag_stopped_within_12mo` |
-| 3 | **High government dependency** — avg government revenue share ≥ 70% across all filing years | `flag_high_gov_dependency` |
-| 4 | **No CRA record at all** — entity received federal grants but has zero CRA filings; completely unverifiable | `flag_no_cra_record` |
-| 5 | **Zero private revenue ever** — no donations or earned income across any filing year; 100% reliant on government | `flag_zero_private_revenue` |
-| 6 | **Zero program spend ever** — charitable program expenditure is zero across all filing years | `flag_zero_program_spend` |
-| 7 | **Compensation exceeds program spend** — total compensation paid out is greater than total spent on programs | `flag_comp_exceeds_programs` |
-| 8 | **Funding gap** — total federal grants received exceed total CRA program spend | `flag_funding_gap` |
-| 9 | **Young org, early grant** — first federal grant arrived within 2 years of first CRA filing; no track record | `flag_young_org` |
-| 10 | **Revenue cliff** — revenue in final filing year dropped below 50% of the prior average; org visibly collapsing | `flag_revenue_cliff` |
+| # | Rule |
+|---|------|
+| 1 | **Ceased operations** — last CRA T3010 filing was 2022 or earlier (2+ years before the 2024 dataset cutoff), indicating the org has gone dark |
+| 2 | **Stopped filing ≤12mo after last grant** — last CRA T3010 filing falls within one year after last federal grant |
+| 3 | **High government dependency** — avg government revenue share ≥ 70% across all filing years |
+| 4 | **No CRA record at all** — entity received federal grants but has zero CRA filings; completely unverifiable |
+| 5 | **Zero private revenue ever** — no donations or earned income across any filing year; 100% reliant on government |
+| 6 | **Zero program spend ever** — charitable program expenditure is zero across all filing years |
+| 7 | **Compensation exceeds program spend** — total compensation paid out is greater than total spent on programs |
+| 8 | **Funding gap** — total federal grants received exceed total CRA program spend |
+| 9 | **Young org, early grant** — first federal grant arrived within 2 years of first CRA filing; no track record |
+| 10 | **Revenue cliff** — revenue in final filing year dropped below 50% of the prior average; org visibly collapsing |
             """
         )
 
-    with st.expander("Adjust rule thresholds", expanded=False):
+    with st.expander("Adjust Rules Thresholds", expanded=True):
         st.caption("Changes take effect on the next scan.")
         tc1, tc2 = st.columns(2)
         with tc1:
-            gov_threshold = st.slider(
-                "3 — Gov dependency threshold",
-                min_value=0, max_value=100, value=70, step=5, format="%d%%",
-                help="Flag entities whose average government revenue share is at or above this level.",
-            ) / 100
-            cliff_threshold = st.slider(
-                "10 — Revenue cliff drop",
-                min_value=10, max_value=90, value=50, step=5, format="%d%%",
-                help="Flag entities whose final filing revenue fell below this % of their prior average.",
-            ) / 100
-            filing_window = st.slider(
-                "2 — Filing window after last grant (months)",
-                min_value=1, max_value=36, value=12, step=1,
-                help="Flag entities whose last CRA filing fell within this many months after their last federal grant.",
-            ) * 30
-        with tc2:
             ceased_cutoff = st.selectbox(
-                "1 — Gone dark cutoff year",
+                "1 — Gone Dark Cutoff Year",
                 options=[2020, 2021, 2022, 2023, 2024],
                 index=2,
                 help="Flag entities whose last CRA filing was before January 1 of this year.",
             )
+            filing_window = st.slider(
+                "2 — Filing Window After Last Grant (Months)",
+                min_value=1, max_value=36, value=12, step=1,
+                help="Flag entities whose last CRA filing fell within this many months after their last federal grant.",
+            ) * 30
+            gov_threshold = st.slider(
+                "3 — Government Dependency Threshold",
+                min_value=0, max_value=100, value=70, step=5, format="%d%%",
+                help="Flag entities whose average government revenue share is at or above this level.",
+            ) / 100
+        with tc2:
             young_org_years = st.slider(
-                "9 — Young org track record window (years)",
+                "9 — Young Organization Track Record Window (Years)",
                 min_value=1, max_value=5, value=2, step=1,
                 help="Flag entities whose first federal grant arrived within this many years of their first CRA filing.",
             )
+            cliff_threshold = st.slider(
+                "10 — Revenue Cliff Drop",
+                min_value=10, max_value=90, value=50, step=5, format="%d%%",
+                help="Flag entities whose final filing revenue fell below this % of their prior average.",
+            ) / 100
             min_fed = st.number_input(
-                "Min federal funding ($)",
+                "Minimum Federal Funding ($)",
                 min_value=0, value=0, step=10_000,
                 help="Only include entities that received at least this much in total federal grants.",
             )
@@ -352,22 +442,21 @@ ceased operations or never meaningfully delivered on that funding.
     # Coverage card
     st.divider()
     st.subheader("Coverage")
-    cov1, cov2, cov3, cov4 = st.columns(4)
-    cov1.metric("Entities scanned", f"{total_entities:,}")
+    cov1, cov2 = st.columns(2)
+    cov1.metric("Entities Scanned", f"{total_entities:,}")
     cov2.metric("Flag rate",        f"{pct:.1f}%")
-    cov3.metric("Scan time",        f"{elapsed:.1f}s")
 
     m1, m2, m3 = st.columns(3)
-    m1.metric("Flagged (≥1 rule)", f"{n_flagged:,}", f"{pct:.1f}% of scanned")
-    m2.metric("Flagged 3 times",   f"{n_three:,}",   f"{pct_three:.1f}% of scanned")
-    m3.metric("Flagged 5+ times",  f"{n_five:,}",    f"{pct_five:.1f}% of scanned")
+    m1.metric("Shortlisted (≥1 Rule)", f"{n_flagged:,}", f"{pct:.1f}% of Scanned")
+    m2.metric("Shortlisted 3 Times",   f"{n_three:,}",   f"{pct_three:.1f}% of Scanned")
+    m3.metric("Shortlisted 5+ Times",  f"{n_five:,}",    f"{pct_five:.1f}% of Scanned")
 
     # Histogram + rule breakdown
     st.divider()
     col_hist, col_table = st.columns(2)
 
     with col_hist:
-        st.subheader("Rules triggered per entity")
+        st.subheader("Rules Triggered Per Entity")
         hist_data = (
             zombie_df["rules_triggered"]
             .value_counts()
@@ -380,7 +469,7 @@ ceased operations or never meaningfully delivered on that funding.
         st.caption("How many rules each flagged entity triggered. Higher = stronger zombie signal.")
 
     with col_table:
-        st.subheader("Rule breakdown")
+        st.subheader("Rule Breakdown")
         breakdown = pd.DataFrame({
             "Rule":  rule_labels,
             "Count": [int(zombie_df[c].sum()) for c in flag_cols],
@@ -389,9 +478,27 @@ ceased operations or never meaningfully delivered on that funding.
         st.dataframe(breakdown, use_container_width=True, hide_index=True)
         st.caption("How many flagged entities each rule contributed to.")
 
+    coverage = {
+        "entities_scanned": total_entities,
+        "flagged_entities": n_flagged,
+        "shown_entities": min(len(zombie_df), 5),
+    }
+    summary_top_rows = zombie_df.head(5)[["canonical_name", "rules_triggered", "province", "fed_total"]].rename(
+        columns={
+            "canonical_name": "Organization",
+            "rules_triggered": "Rules triggered",
+            "province": "Province",
+            "fed_total": "Federal funding",
+        }
+    ).to_dict(orient="records")
+    breakdown_rows = breakdown.to_dict(orient="records")
+
+    st.divider()
+    _render_fetch_summary_advisor("User-Defined Rules", coverage, summary_top_rows, breakdown_rows)
+
     # Detailed results table with checkboxes
     st.divider()
-    st.subheader("Flagged entities")
+    st.subheader("Shortlisted Entities")
     zombie_df = zombie_df.sort_values("rules_triggered", ascending=False).reset_index(drop=True)
     flag = lambda col: zombie_df[col].apply(lambda v: "✓" if v else "")
     display_df = pd.DataFrame({
@@ -419,6 +526,7 @@ ceased operations or never meaningfully delivered on that funding.
         "9 Young org":        flag("flag_young_org"),
         "10 Revenue cliff":   flag("flag_revenue_cliff"),
     })
+    display_df.loc[display_df.index[:5], "Select"] = True
     edited_df = st.data_editor(
         display_df,
         use_container_width=True,
@@ -431,7 +539,7 @@ ceased operations or never meaningfully delivered on that funding.
     add_col, _ = st.columns([1, 3])
     with add_col:
         if st.button(
-            f"Add {n_checked} to Flagged List" if n_checked else "Add to Flagged List",
+            f"Add {n_checked} to Shortlist" if n_checked else "Add to Shortlist",
             type="primary",
             disabled=n_checked == 0,
             use_container_width=True,
@@ -448,6 +556,7 @@ ceased operations or never meaningfully delivered on that funding.
                         "entity_type":     row["entity_type"],
                         "status":          row["status"],
                         "dataset_sources": list(row.get("dataset_sources") or []),
+                        "include_for_analysis": True,
                         "rules_triggered": int(row["rules_triggered"]),
                         "province":        row.get("province", ""),
                         "fed_total":       float(row["fed_total"]),
@@ -455,10 +564,11 @@ ceased operations or never meaningfully delivered on that funding.
                     existing_bns.add(row["bn_root"])
                     added += 1
             if added:
+                lock_analysis_step()
                 clear_downstream_results()
-                st.success(f"Added {added} organization(s) to the Flagged List.")
+                st.success(f"Added {added} organization(s) to the Shortlist.")
             else:
-                st.info("All selected organizations were already in the Flagged List.")
+                st.info("All selected organizations were already in the Shortlist.")
 
 
 # ─── Natural language database search ─────────────────────────────────────────
@@ -575,6 +685,12 @@ def _render_natural_language_search() -> None:
 #         if spec.get("explanation"):
 #             st.caption(spec["explanation"])
 #
+
+WAY2_MODEL_OPTIONS = {
+    "Empirical CDF Outlier Detection (ECOD)": "ECOD",
+    "Isolation Forest": "Isolation Forest",
+    "Local Outlier Factor (LOF)": "LOF",
+}
 
 def _render_way4_raw_lookup() -> None:
     st.subheader("Filter Lookup")
@@ -701,9 +817,9 @@ def _render_way4_raw_lookup() -> None:
 # ─── Flagged entities page ─────────────────────────────────────────────────────
 
 def render_flagged() -> None:
-    st.title("ZombieTrace")
-    st.subheader("Flagged Entities — Review List")
-    st.caption("The first 10 candidates are preselected for analysis. Adjust the checklist, then continue.")
+    st.title("FundTrace")
+    st.subheader("Flagged Entities — Review Shortlist")
+    st.caption("All entities added from the search page are selected here automatically. Uncheck any organization you want to exclude, then elevate the rest to analysis.")
 
     flagged = st.session_state["flagged_list"]
 
@@ -711,10 +827,12 @@ def render_flagged() -> None:
         st.info("No entities flagged yet. Run a scan in Fetch → User-Defined Rules and check the boxes to add organizations here.")
         return
 
-    st.caption(f"{len(flagged)} organization(s) in your list.")
+    flagged = sorted(flagged, key=lambda e: int(e.get("rules_triggered", 0)), reverse=True)
+    start_shortlist_analysis_preload(flagged)
+    st.caption(f"{len(flagged)} organization(s) in your shortlist.")
 
     flagged_display = pd.DataFrame({
-        "Include":         [i < 10 for i in range(len(flagged))],
+        "Include":         [e.get("include_for_analysis", True) for e in flagged],
         "Organization":    [e["canonical_name"] for e in flagged],
         "BN":              [e["bn_root"] for e in flagged],
         "Province":        [e.get("province", "") for e in flagged],
@@ -733,31 +851,41 @@ def render_flagged() -> None:
     )
 
     n_include = int(edited_flagged["Include"].sum())
-    st.caption(f"{n_include} organization(s) selected for analysis.")
+    st.caption(f"{n_include} organization(s) currently selected for analysis.")
 
     apply_col, clear_col, _ = st.columns([1, 1, 3])
     with apply_col:
         if st.button(
-            "Apply selection",
+            "Apply Selection",
             disabled=n_include == len(flagged),
             use_container_width=True,
         ):
-            keep = edited_flagged.index[edited_flagged["Include"]].tolist()
-            st.session_state["flagged_list"] = [flagged[i] for i in keep]
+            updated_flagged = []
+            for i, entity in enumerate(flagged):
+                updated_entity = dict(entity)
+                updated_entity["include_for_analysis"] = bool(edited_flagged.iloc[i]["Include"])
+                updated_flagged.append(updated_entity)
+            st.session_state["flagged_list"] = updated_flagged
+            lock_analysis_step()
             clear_downstream_results()
             st.rerun()
     with clear_col:
-        if st.button("Clear all", use_container_width=True):
+        if st.button("Clear All", use_container_width=True):
             st.session_state["flagged_list"] = []
+            lock_analysis_step()
             clear_downstream_results()
             st.rerun()
 
-    st.divider()
-    st.subheader("Continue to analysis")
+    st.subheader("Elevate Entities for Further Analysis")
     if st.button("Elevate These Entities by Analyzing Them", type="primary", disabled=n_include == 0, use_container_width=True):
         keep = edited_flagged.index[edited_flagged["Include"]].tolist()
-        selected_flagged = [flagged[i] for i in keep]
+        selected_flagged = []
+        for i in keep:
+            entity = dict(flagged[i])
+            entity["include_for_analysis"] = True
+            selected_flagged.append(entity)
         st.session_state["flagged_list"] = selected_flagged
+        unlock_analysis_step()
         clear_downstream_results()
         set_selected_entity(selected_flagged[0])
         go_to_page("Analyze")
@@ -787,17 +915,13 @@ def _format_way2_display(df: pd.DataFrame) -> pd.DataFrame:
 
 def _render_way2() -> None:
     st.subheader("Anomaly Detection (AI)")
-    st.caption(
-        "Ranks organizations that look statistically unusual compared with "
-        "similar publicly funded peers. Uses user-defined rule signals as model features. No LLM."
-    )
     st.markdown(
         "This method uses anomaly detection to find organizations whose funding, filing, spending, "
         "and capacity patterns differ from comparable peers. Instead of checking one rule at a time, "
         "the algorithm considers multiple signals together and prioritizes entities that deserve closer review."
     )
 
-    with st.expander("How This Method Works", expanded=False):
+    with st.expander("How This Method Works", expanded=True):
         st.markdown(
             """
 **This method combines unsupervised anomaly detection with the 10 user-defined rules as domain knowledge features.**
@@ -817,9 +941,9 @@ from making small charities look normal.
 | Domain knowledge | Rules triggered (count of user-defined rule flags), gov × low-program interaction |
 
 **Models available:**
-- **ECOD** — Empirical CDF outlier detection. Parameter-free, fast, robust to outliers in the training data.
+- **Empirical CDF Outlier Detection (ECOD)** — Parameter-free, fast, robust to outliers in the training data.
 - **Isolation Forest** — Tree-based anomaly detection. Good for high-dimensional data.
-- **LOF** — Local Outlier Factor. Best for detecting local density anomalies.
+- **Local Outlier Factor (LOF)** — Best for detecting local density anomalies.
 
 **Peer grouping:**
 Entities are scored within groups sharing the same entity type and funding band.
@@ -827,15 +951,16 @@ Groups smaller than 15 entities fall back to global scoring.
             """
         )
 
-    with st.expander("Configure anomaly scan", expanded=True):
+    with st.expander("Configure Anomaly Scan", expanded=True):
         w2c1, w2c2 = st.columns(2)
         with w2c1:
-            selected_model = st.selectbox(
+            selected_model_label = st.selectbox(
                 "Anomaly model",
-                ["ECOD", "Isolation Forest", "LOF"],
+                list(WAY2_MODEL_OPTIONS.keys()),
                 index=0,
-                help="ECOD is fastest and parameter-free. IF and LOF require sklearn.",
+                help="Empirical CDF Outlier Detection (ECOD) is fastest and parameter-free. Isolation Forest and Local Outlier Factor (LOF) require sklearn.",
             )
+            selected_model = WAY2_MODEL_OPTIONS[selected_model_label]
             peer_grouping = st.selectbox(
                 "Peer grouping",
                 ["By entity type + funding band", "By entity type", "By funding band", "None / global"],
@@ -886,16 +1011,15 @@ Groups smaller than 15 entities fall back to global scoring.
     # Metrics
     st.divider()
     st.subheader("Coverage")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Entities scored",  f"{len(way2_df):,}")
-    m2.metric("Scan time",        f"{elapsed_w2:.1f}s")
+    m1, m3, m4 = st.columns(3)
+    m1.metric("Entities Scored",  f"{len(way2_df):,}")
     m3.metric("Model",            st.session_state.get("way2_model", "—"))
     m4.metric("Shown",            f"{len(top_df):,}")
 
     # Score distribution
     col_hist, col_rules = st.columns(2)
     with col_hist:
-        st.subheader("Anomaly score distribution")
+        st.subheader("Anomaly Score Distribution")
         import numpy as np
         bins = np.linspace(0, 1, 11)
         counts, edges = np.histogram(way2_df["anomaly_score"].clip(0, 1), bins=bins)
@@ -907,7 +1031,7 @@ Groups smaller than 15 entities fall back to global scoring.
         st.caption("Distribution of anomaly scores across all scored entities.")
 
     with col_rules:
-        st.subheader("Top anomalies: rules triggered")
+        st.subheader("Top Anomalies: Rules Triggered")
         rule_dist = (
             top_df["rules_triggered"]
             .apply(lambda v: int(float(v)))
@@ -920,14 +1044,33 @@ Groups smaller than 15 entities fall back to global scoring.
         st.altair_chart(_labeled_bar_chart(rule_dist, "Rules triggered", "Entities", height=250), use_container_width=True)
         st.caption(f"How many user-defined rules each top-{len(top_df)} anomaly triggered.")
 
+    coverage = {
+        "entities_scored": len(way2_df),
+        "flagged_entities": len(top_df),
+        "shown_entities": len(top_df),
+    }
+    summary_top_rows = top_df.head(5)[["canonical_name", "anomaly_score", "rules_triggered", "province"]].rename(
+        columns={
+            "canonical_name": "Organization",
+            "anomaly_score": "Anomaly score",
+            "rules_triggered": "Rules triggered",
+            "province": "Province",
+        }
+    ).to_dict(orient="records")
+    breakdown_rows = rule_dist.to_dict(orient="records")
+
+    st.divider()
+    _render_fetch_summary_advisor("Anomaly Detection (AI)", coverage, summary_top_rows, breakdown_rows)
+
     # Results table with checkboxes — sorted by rules triggered desc, then anomaly score desc
     top_df = top_df.sort_values(
         ["rules_triggered", "anomaly_score"], ascending=[False, False]
     ).reset_index(drop=True)
 
     st.divider()
-    st.subheader(f"Top {len(top_df)} anomalies")
+    st.subheader(f"Top {len(top_df)} Anomalies")
     display_df = _format_way2_display(top_df)
+    display_df.loc[display_df.index[:5], "Select"] = True
 
     edited_w2 = st.data_editor(
         display_df,
@@ -941,7 +1084,7 @@ Groups smaller than 15 entities fall back to global scoring.
     add_col_w2, _ = st.columns([1, 3])
     with add_col_w2:
         if st.button(
-            f"Add {n_checked_w2} to Flagged List" if n_checked_w2 else "Add to Flagged List",
+            f"Add {n_checked_w2} to Shortlist" if n_checked_w2 else "Add to Shortlist",
             type="primary",
             disabled=n_checked_w2 == 0,
             use_container_width=True,
@@ -959,6 +1102,7 @@ Groups smaller than 15 entities fall back to global scoring.
                         "entity_type":     row.get("entity_type", ""),
                         "status":          row.get("status", "active"),
                         "dataset_sources": list(row.get("dataset_sources") or []),
+                        "include_for_analysis": True,
                         "rules_triggered": int(float(row.get("rules_triggered", 0))),
                         "province":        row.get("province", ""),
                         "fed_total":       float(row["fed_total"]),
@@ -966,7 +1110,8 @@ Groups smaller than 15 entities fall back to global scoring.
                     existing_bns.add(row["bn_root"])
                     added += 1
             if added:
+                lock_analysis_step()
                 clear_downstream_results()
-                st.success(f"Added {added} organization(s) to the Flagged List.")
+                st.success(f"Added {added} organization(s) to the Shortlist.")
             else:
-                st.info("All selected organizations were already in the Flagged List.")
+                st.info("All selected organizations were already in the Shortlist.")

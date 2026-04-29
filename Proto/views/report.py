@@ -15,6 +15,7 @@ from agent.orchestrator import (
 from views.general import (
     SEVERITY_COLOUR,
     go_to_page,
+    reset_workflow,
     selected_entity_bn,
     selected_entity_name,
 )
@@ -248,6 +249,86 @@ def _render_run_analysis_prompt() -> None:
         go_to_page("Analyze")
 
 
+def _build_narrative_brief_prompt(data: dict) -> str:
+    return (
+        "You are a government accountability analyst writing a short entity narrative from structured evidence only. "
+        f"Entity analysis: {json.dumps(_to_plain(data), default=str)}. "
+        "Write 2 short paragraphs. Explain why this entity stands out, cite the main signals, and suggest the next review action. "
+        "Do not invent numbers or new facts."
+    )
+
+
+def _narrative_brief_placeholder(data: dict) -> dict:
+    signals = [s for s in (_to_plain(data).get("signals") or []) if _to_plain(s).get("flagged")]
+    top_signal_labels = [
+        _to_plain(signal).get("label", _to_plain(signal).get("dimension", ""))
+        for signal in signals[:3]
+    ]
+    top_signals = ", ".join(top_signal_labels) if top_signal_labels else "no dominant signal cluster"
+    summary = (
+        f"{data.get('canonical_name', 'This organization')} stands out because its profile combines "
+        f"{top_signals} with a ghost score of {_float_value(data.get('ghost_score')):.3f}. "
+        f"The current evidence points to a {str(data.get('overall_risk', 'UNKNOWN')).lower()}-risk case that merits document review."
+    )
+    actions = [
+        "Verify recent operational activity against the latest public filings.",
+        "Cross-check the largest funding periods against program-delivery evidence.",
+    ]
+    return {
+        "entity": data.get("canonical_name", "Unknown"),
+        "overall_risk": data.get("overall_risk", "UNKNOWN"),
+        "confidence": data.get("confidence", "-"),
+        "summary": summary,
+        "signals": signals[:3],
+        "recommended_actions": actions,
+        "limitations": "Placeholder output until LLM credentials are enabled.",
+    }
+
+
+def _render_narrative_brief_panel(result) -> None:
+    if not result:
+        return
+
+    data = _to_plain(result)
+    prompt = _build_narrative_brief_prompt(data)
+    cached_bn = st.session_state.get("narrative_brief_bn")
+    brief = st.session_state.get("narrative_brief")
+    if not brief or cached_bn != data.get("bn_root"):
+        brief = _narrative_brief_placeholder(data)
+        st.session_state["narrative_brief"] = brief
+        st.session_state["narrative_brief_bn"] = data.get("bn_root")
+
+    brief_data = _to_plain(brief)
+    st.divider()
+    st.subheader("Narrative Brief")
+    st.info(brief_data.get("summary", "No narrative generated."))
+    st.caption("Placeholder for a future LLM-written entity narrative.")
+    if brief_data.get("recommended_actions"):
+        for action in brief_data["recommended_actions"]:
+            st.markdown(f"- {action}")
+    st.session_state["narrative_brief_prompt"] = prompt
+
+
+def _build_business_report_prompt(batch_results: list, portfolio_result: dict) -> str:
+    return (
+        "You are a Senior Executive Policy Analyst for the Government of Alberta writing an official Executive Briefing Note. "
+        f"Entity results: {json.dumps(_to_plain(batch_results), default=str)}. "
+        f"Portfolio context: {json.dumps(_to_plain(portfolio_result), default=str)}. "
+        "Use only the provided data. Follow the fixed briefing-note template and do not invent facts."
+    )
+
+
+def _render_briefing_bullets(items) -> None:
+    if isinstance(items, list) and items:
+        for item in items:
+            st.markdown(f"- {item}")
+        return
+    if items:
+        st.markdown(f"- {items}")
+        return
+    st.markdown("- N/A based on provided data.")
+
+
 def _render_aggregate_dashboard(results: list) -> None:
     df = _results_dataframe(results)
     if df.empty:
@@ -363,6 +444,15 @@ def _render_aggregate_dashboard(results: list) -> None:
         st.markdown(f"- Combined funding gap across analyzed entities is {_money(df['funding_gap'].sum())}.")
     if df["avg_gov_dependency"].mean() >= 0.80:
         st.markdown("- The aggregate set shows very high government revenue dependency.")
+
+    st.divider()
+    st.subheader("Narrative Brief")
+    st.info(
+        f"This aggregate dashboard summarizes {len(df):,} analyzed organizations. "
+        f"{high_or_critical:,} are currently ranked CRITICAL or HIGH, with "
+        f"{top_entity.get('canonical_name', 'Unknown')} as the highest-risk lead."
+    )
+    st.caption("Placeholder for an entity-level LLM narrative. Select a specific organization above to generate it.")
 
     st.divider()
     st.subheader("Signal Details")
@@ -535,6 +625,8 @@ def _render_risk_card(result) -> None:
     for insight in _insight_lines(data, signal_chart_df):
         st.markdown(f"- {insight}")
 
+    _render_narrative_brief_panel(result)
+
     st.divider()
     st.subheader("Signal Details")
     with st.expander("View Signal Details", expanded=False):
@@ -669,52 +761,35 @@ def _render_portfolio_tab() -> None:
         )
 
 
-def _build_report_markdown(summary: str, actions: list[str], results: list, portfolio_result: dict) -> str:
-    lines = ["# ZombieTrace Business Report", ""]
-    lines += ["## Executive Summary", summary, ""]
-    lines += ["## Risk Overview", ""]
-
-    total     = len(results)
-    critical  = sum(1 for r in results if r.overall_risk == "CRITICAL")
-    high      = sum(1 for r in results if r.overall_risk == "HIGH")
-    avg_score = sum(r.ghost_score for r in results) / max(total, 1)
-    total_fed = sum(r.fed_total for r in results)
-    total_gap = sum(r.funding_gap for r in results)
-    stats     = portfolio_result.get("portfolio", {})
-    by_prov   = stats.get("by_province", pd.DataFrame())
-    univ_total = portfolio_result.get("total_entities", 0)
-    univ_risky = int(by_prov["risky_count"].sum()) if not by_prov.empty and "risky_count" in by_prov.columns else 0
-
+def _build_report_markdown(report: dict) -> str:
+    lines = [f"**{report.get('document_classification', 'FOR INFORMATION')}**", ""]
+    lines += ["**MINISTER BRIEFING NOTE**", f"**AR #:** {report.get('ar_number', 'AR-2026-XXXX')}", ""]
+    lines += [f"**TOPIC:** {report.get('topic', 'N/A based on provided data.')}", f"**PURPOSE:** {report.get('purpose', 'N/A based on provided data.')}", ""]
+    lines += ["**ISSUE**", f"* {report.get('issue', 'N/A based on provided data.')}", ""]
+    lines += ["**RECOMMENDATION / ADVICE**"]
+    for item in report.get("recommendation_advice") or ["N/A based on provided data."]:
+        lines.append(f"* {item}")
+    lines.append("")
+    lines += ["**BACKGROUND**"]
+    for item in report.get("background") or ["N/A based on provided data."]:
+        lines.append(f"* {item}")
+    lines.append("")
+    lines += ["**CURRENT STATUS / KEY CONSIDERATIONS**"]
+    for item in report.get("current_status_key_considerations") or ["N/A based on provided data."]:
+        lines.append(f"* {item}")
+    lines.append("")
+    lines += ["**COMMUNICATIONS**"]
+    for item in report.get("communications") or ["N/A based on provided data."]:
+        lines.append(f"* {item}")
+    lines.append("")
+    lines += ["**ATTACHMENTS**"]
+    for item in report.get("attachments") or ["N/A based on provided data."]:
+        lines.append(f"* {item}")
+    lines.append("")
     lines += [
-        f"| Metric | Value |",
-        f"|---|---|",
-        f"| Entities Analyzed | {total} |",
-        f"| Critical | {critical} |",
-        f"| High | {high} |",
-        f"| Avg Ghost Score | {avg_score:.3f} |",
-        f"| Total Federal Funding | {_money(total_fed)} |",
-        f"| Total Funding Gap | {_money(total_gap)} |",
-        f"| Universe Entities | {univ_total:,} |",
-        f"| Universe Risky | {univ_risky:,} |",
-        "",
+        f"**CONTACT:** {report.get('contact', 'N/A based on provided data.')}",
+        f"**REVIEWED/APPROVED BY:** {report.get('reviewed_approved_by', 'N/A based on provided data.')}",
     ]
-
-    lines += ["## Entity Findings", ""]
-    lines += ["| Organization | Risk | Ghost Score | Province | Top Flags |", "|---|---|---|---|---|"]
-    for r in sorted(results, key=lambda x: x.ghost_score, reverse=True):
-        data = _to_plain(r)
-        flags = ", ".join(data.get("top_flags") or [])
-        lines.append(
-            f"| {data.get('canonical_name','-')} | {data.get('overall_risk','-')} "
-            f"| {_float_value(data.get('ghost_score')):.3f} | {data.get('province','-')} | {flags} |"
-        )
-    lines.append("")
-
-    lines += ["## Recommended Actions", ""]
-    for i, action in enumerate(actions, 1):
-        lines.append(f"{i}. {action}")
-    lines.append("")
-
     return "\n".join(lines)
 
 
@@ -735,84 +810,72 @@ def _render_business_report_tab() -> None:
         with st.spinner("Building report..."):
             result = run_business_report(batch_results, portfolio_result)
         st.session_state["business_report"] = result
+        st.session_state["business_report_prompt"] = _build_business_report_prompt(
+            batch_results,
+            portfolio_result,
+        )
 
     report = st.session_state.get("business_report")
     if not report:
         return
 
-    summary = report.get("executive_summary", "")
-    actions = report.get("recommended_actions", [])
+    if "business_report_prompt" not in st.session_state:
+        st.session_state["business_report_prompt"] = _build_business_report_prompt(
+            batch_results,
+            portfolio_result,
+        )
 
-    # ── Executive Summary (LLM) ───────────────────────────────────────────────
-    st.subheader("Executive Summary")
-    st.info(summary)
+    st.subheader(report.get("document_classification", "FOR INFORMATION"))
+    st.caption("Placeholder for a future LLM-written Executive Briefing Note.")
 
-    st.divider()
-
-    # ── Risk Overview (deterministic) ─────────────────────────────────────────
-    st.subheader("Risk Overview")
-    total     = len(batch_results)
-    critical  = sum(1 for r in batch_results if r.overall_risk == "CRITICAL")
-    high      = sum(1 for r in batch_results if r.overall_risk == "HIGH")
-    avg_score = sum(r.ghost_score for r in batch_results) / max(total, 1)
-    total_fed = sum(r.fed_total for r in batch_results)
-    total_gap = sum(r.funding_gap for r in batch_results)
-    stats     = portfolio_result.get("portfolio", {})
-    by_prov   = stats.get("by_province", pd.DataFrame())
-    univ_total = portfolio_result.get("total_entities", 0)
-    univ_risky = int(by_prov["risky_count"].sum()) if not by_prov.empty and "risky_count" in by_prov.columns else 0
-
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Entities Analyzed", total)
-    c2.metric("Critical / High", f"{critical} / {high}")
-    c3.metric("Avg Ghost Score", f"{avg_score:.3f}")
-    c4.metric("Total Funding Gap", _money(total_gap))
-
-    c5, c6, _, __ = st.columns(4)
-    c5.metric("Total Federal Funding", _money(total_fed))
-    c6.metric("Universe Risky", f"{univ_risky:,} of {univ_total:,}")
+    st.markdown("**MINISTER BRIEFING NOTE**")
+    st.markdown(f"**AR #:** {report.get('ar_number', 'AR-2026-XXXX')}")
 
     st.divider()
-
-    # ── Entity Findings (deterministic) ──────────────────────────────────────
-    st.subheader("Entity Findings")
-    rows = []
-    for r in sorted(batch_results, key=lambda x: x.ghost_score, reverse=True):
-        data = _to_plain(r)
-        colour = SEVERITY_COLOUR.get(data.get("overall_risk"), "⚪")
-        rows.append({
-            "Organization": data.get("canonical_name", "-"),
-            "Risk":         f"{colour} {data.get('overall_risk', '-')}",
-            "Ghost Score":  f"{_float_value(data.get('ghost_score')):.3f}",
-            "Province":     data.get("province", "-"),
-            "Fed Funding":  _money(data.get("fed_total")),
-            "Funding Gap":  _money(data.get("funding_gap")),
-            "Top Flags":    ", ".join(data.get("top_flags") or []),
-        })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+    st.markdown(f"**TOPIC:** {report.get('topic', 'N/A based on provided data.')}")
+    st.markdown(f"**PURPOSE:** {report.get('purpose', 'N/A based on provided data.')}")
 
     st.divider()
+    st.markdown("**ISSUE**")
+    st.markdown(f"- {report.get('issue', 'N/A based on provided data.')}")
 
-    # ── Recommended Actions (LLM) ─────────────────────────────────────────────
-    st.subheader("Recommended Actions")
-    for i, action in enumerate(actions, 1):
-        st.markdown(f"**{i}.** {action}")
+    st.markdown("**RECOMMENDATION / ADVICE**")
+    _render_briefing_bullets(report.get("recommendation_advice"))
 
     st.divider()
+    st.markdown("**BACKGROUND**")
+    _render_briefing_bullets(report.get("background"))
+
+    st.divider()
+    st.markdown("**CURRENT STATUS / KEY CONSIDERATIONS**")
+    _render_briefing_bullets(report.get("current_status_key_considerations"))
+
+    st.divider()
+    st.markdown("**COMMUNICATIONS**")
+    _render_briefing_bullets(report.get("communications"))
+
+    st.divider()
+    st.markdown("**ATTACHMENTS**")
+    _render_briefing_bullets(report.get("attachments"))
+
+    st.divider()
+    st.markdown(f"**CONTACT:** {report.get('contact', 'N/A based on provided data.')}")
+    st.markdown(f"**REVIEWED/APPROVED BY:** {report.get('reviewed_approved_by', 'N/A based on provided data.')}")
+    st.markdown(f"**DATE:** {pd.Timestamp.now().date().isoformat()}")
 
     # ── Download ──────────────────────────────────────────────────────────────
-    md = _build_report_markdown(summary, actions, batch_results, portfolio_result)
+    md = _build_report_markdown(report)
     st.download_button(
-        "Download Report (Markdown)",
+        "Download Briefing Note (Markdown)",
         data=md,
-        file_name="zombietrace-business-report.md",
+        file_name="fundtrace-minister-briefing-note.md",
         mime="text/markdown",
         use_container_width=False,
     )
 
 
 def render_report() -> None:
-    st.title("ZombieTrace")
+    st.title("FundTrace")
     st.subheader("Report Mode")
     st.caption("Render structured risk reports from deterministic analysis, with optional LLM-written narrative.")
 
@@ -839,3 +902,16 @@ def render_report() -> None:
 
     with tab_business:
         _render_business_report_tab()
+
+    st.divider()
+    st.subheader("Start Over")
+    st.caption("Clear the current investigation and begin a new one.")
+    restart_col, _ = st.columns([1, 2])
+    with restart_col:
+        st.button(
+            "Start Over",
+            type="primary",
+            use_container_width=True,
+            on_click=reset_workflow,
+            key="report_start_over",
+        )
