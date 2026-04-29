@@ -409,6 +409,16 @@ def render_home() -> None:
     st.caption("Find Canadian organizations collecting public money with nothing to show for it.")
     st.divider()
 
+    # Data Scale Metrics
+    st.markdown("### Data Scale")
+    kpi1, kpi2, kpi3, kpi4 = st.columns(4)
+    kpi1.metric("Grant Records", "1.27M+", help="Federal grant records screened across all departments and programs")
+    kpi2.metric("Recipient Entities", "~140K", help="Unique recipient organizations indexed by Business Number")
+    kpi3.metric("Risk Rules", "10", help="Configurable zombie-recipient detection rules")
+    kpi4.metric("Anomaly Models", "3", help="ML-based anomaly detection methods (ECOD, Isolation Forest, LOF)")
+    
+    st.divider()
+
     st.subheader("What this app does")
     st.write(
         "Every year, billions in federal grants flow to Canadian non-profits and charities. "

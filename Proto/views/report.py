@@ -251,14 +251,56 @@ def _render_run_analysis_prompt() -> None:
 
 def _build_narrative_brief_prompt(data: dict) -> str:
     return (
-        "You are a government accountability analyst writing a short entity narrative from structured evidence only. "
+        "You are a senior policy analyst preparing an executive briefing on a high-risk funding recipient. "
         f"Entity analysis: {json.dumps(_to_plain(data), default=str)}. "
-        "Write 2 short paragraphs. Explain why this entity stands out, cite the main signals, and suggest the next review action. "
-        "Do not invent numbers or new facts."
+        "Write a comprehensive executive narrative in 3-4 paragraphs covering: "
+        "(1) Why this entity warrants executive attention and the severity of findings, "
+        "(2) The specific evidence signals and their implications for public funds, "
+        "(3) Systemic concerns or patterns that suggest broader oversight issues, "
+        "(4) Recommended immediate actions with clear next steps for decision-makers. "
+        "Use authoritative language suitable for deputy ministers and senior officials. "
+        "Do not invent numbers or new facts. Be objective and grounded in the provided evidence."
     )
 
 
 def _narrative_brief_placeholder(data: dict) -> dict:
+    """
+    LLM-powered entity narrative brief with deterministic fallback.
+    
+    Generates a narrative brief from structured entity analysis data.
+    Falls back to deterministic output if LLM is unavailable.
+    """
+    from agent.llm_client import call_llm
+    
+    # Build the prompt
+    prompt = _build_narrative_brief_prompt(data)
+    
+    # Try LLM call
+    llm_response = call_llm(
+        system_prompt=(
+            "You are a senior policy analyst preparing executive briefings on high-risk funding recipients. "
+            "Write comprehensive narratives for deputy ministers and senior government officials. "
+            "Cover: (1) severity and why it warrants attention, (2) specific evidence and implications, "
+            "(3) systemic concerns, (4) recommended actions with clear next steps. "
+            "Use 3-4 paragraphs. Be authoritative, objective, and grounded in provided evidence only. "
+            "Do not invent numbers or new facts. Return JSON only with this shape: "
+            '{"entity": "name", "overall_risk": "CRITICAL|HIGH|MEDIUM|LOW", "confidence": "High|Medium|Low", '
+            '"summary": "3-4 paragraphs", "signals": [{"label": "...", "severity": "...", "evidence": "..."}], '
+            '"recommended_actions": ["action1", "action2"], "limitations": "..."}'
+        ),
+        user_prompt=prompt,
+        max_tokens=1000,
+    )
+    
+    if llm_response:
+        try:
+            import json
+            return json.loads(llm_response.strip())
+        except json.JSONDecodeError:
+            # If JSON parsing fails, fall through to deterministic output
+            pass
+    
+    # Fallback to deterministic output
     signals = [s for s in (_to_plain(data).get("signals") or []) if _to_plain(s).get("flagged")]
     top_signal_labels = [
         _to_plain(signal).get("label", _to_plain(signal).get("dimension", ""))
@@ -281,7 +323,7 @@ def _narrative_brief_placeholder(data: dict) -> dict:
         "summary": summary,
         "signals": signals[:3],
         "recommended_actions": actions,
-        "limitations": "Placeholder output until LLM credentials are enabled.",
+        "limitations": "Deterministic fallback used (LLM unavailable)." if not llm_response else "",
     }
 
 
@@ -302,7 +344,6 @@ def _render_narrative_brief_panel(result) -> None:
     st.divider()
     st.subheader("Narrative Brief")
     st.info(brief_data.get("summary", "No narrative generated."))
-    st.caption("Placeholder for a future LLM-written entity narrative.")
     if brief_data.get("recommended_actions"):
         for action in brief_data["recommended_actions"]:
             st.markdown(f"- {action}")
@@ -316,6 +357,92 @@ def _build_business_report_prompt(batch_results: list, portfolio_result: dict) -
         f"Portfolio context: {json.dumps(_to_plain(portfolio_result), default=str)}. "
         "Use only the provided data. Follow the fixed briefing-note template and do not invent facts."
     )
+
+
+def _render_briefing_bullets(items) -> None:
+    if isinstance(items, list) and items:
+        for item in items:
+            st.markdown(f"- {item}")
+        return
+    if items:
+        st.markdown(f"- {items}")
+        return
+    st.markdown("- N/A based on provided data.")
+
+
+def _render_aggregate_executive_narrative(df: pd.DataFrame, results: list, high_or_critical: int, top_entity: pd.Series) -> None:
+    """
+    Generates and displays an executive-level narrative for the aggregate dashboard.
+    Uses LLM to create a comprehensive briefing suitable for senior stakeholders.
+    """
+    from agent.llm_client import call_llm
+    
+    # Build context for LLM
+    total_entities = len(df)
+    critical_count = int(df[df["overall_risk"] == "CRITICAL"].shape[0])
+    high_count = int(df[df["overall_risk"] == "HIGH"].shape[0])
+    total_funding = df["fed_total"].sum()
+    total_gap = df["funding_gap"].sum()
+    avg_ghost = df["ghost_score"].mean()
+    zero_emp = int((df["total_employees"] == 0).sum())
+    
+    # Get top 3 entities
+    top_3 = df.nlargest(3, "ghost_score")[["canonical_name", "ghost_score", "overall_risk", "fed_total"]].to_dict("records")
+    
+    # Get province distribution
+    province_dist = df["province"].value_counts().head(3).to_dict() if "province" in df.columns else {}
+    
+    context = {
+        "total_analyzed": total_entities,
+        "critical": critical_count,
+        "high": high_count,
+        "avg_ghost_score": round(avg_ghost, 3),
+        "total_federal_funding": round(total_funding, 0),
+        "total_funding_gap": round(total_gap, 0),
+        "zero_employee_count": zero_emp,
+        "top_3_entities": top_3,
+        "province_distribution": province_dist,
+    }
+    
+    prompt = (
+        f"You are briefing senior government executives on a ghost capacity investigation. "
+        f"Context: {json.dumps(context)}. "
+        f"Write an executive narrative in 4-5 sentences covering: "
+        f"(1) Overall severity assessment and scale, "
+        f"(2) The most concerning findings and entities, "
+        f"(3) Systemic patterns or geographic concentrations, "
+        f"(4) Financial exposure and risk to public funds, "
+        f"(5) Recommended immediate actions for executive decision. "
+        f"Use authoritative, clear language suitable for deputy ministers and senior officials. "
+        f"Do not invent facts beyond the provided data."
+    )
+    
+    # Try LLM call
+    llm_response = call_llm(
+        system_prompt=(
+            "You are a senior policy analyst preparing executive briefings on public funding oversight. "
+            "Write clear, authoritative narratives for deputy ministers and senior government officials. "
+            "Focus on severity, systemic patterns, financial exposure, and actionable recommendations. "
+            "Be concise, objective, and grounded in provided data only."
+        ),
+        user_prompt=prompt,
+        max_tokens=400,
+    )
+    
+    if llm_response:
+        narrative = llm_response.strip()
+    else:
+        # Fallback to deterministic narrative
+        narrative = (
+            f"This investigation analyzed {total_entities} organizations flagged for potential ghost capacity patterns. "
+            f"{critical_count} entities are rated CRITICAL and {high_count} are rated HIGH, representing significant oversight concerns. "
+            f"The highest-risk entity is {top_entity.get('canonical_name', 'Unknown')} with a ghost score of {top_entity.get('ghost_score', 0):.3f}. "
+            f"Combined federal funding exposure across analyzed entities totals {_money(total_funding)}, with a funding gap of {_money(total_gap)}. "
+            f"Immediate action recommended: prioritize review of CRITICAL and HIGH-rated entities before next funding cycle."
+        )
+    
+    st.subheader("Executive Summary")
+    st.info(narrative)
 
 
 def _render_briefing_bullets(items) -> None:
@@ -358,6 +485,10 @@ def _render_aggregate_dashboard(results: list) -> None:
 
     st.subheader("Aggregate dashboard")
     st.caption(f"{len(df):,} analyzed organization(s) summarized as one report.")
+
+    # Executive Narrative at the top
+    st.divider()
+    _render_aggregate_executive_narrative(df, results, high_or_critical, top_entity)
 
     st.divider()
     st.subheader("KPIs")
@@ -446,15 +577,6 @@ def _render_aggregate_dashboard(results: list) -> None:
         st.markdown("- The aggregate set shows very high government revenue dependency.")
 
     st.divider()
-    st.subheader("Narrative Brief")
-    st.info(
-        f"This aggregate dashboard summarizes {len(df):,} analyzed organizations. "
-        f"{high_or_critical:,} are currently ranked CRITICAL or HIGH, with "
-        f"{top_entity.get('canonical_name', 'Unknown')} as the highest-risk lead."
-    )
-    st.caption("Placeholder for an entity-level LLM narrative. Select a specific organization above to generate it.")
-
-    st.divider()
     st.subheader("Signal Details")
     with st.expander("View Aggregate Signal Details", expanded=False):
         signal_df = _aggregate_signal_rows(results)
@@ -502,6 +624,9 @@ def _render_risk_card(result) -> None:
         f"{data.get('province') or '-'} | "
         f"Confidence: {data.get('confidence') or '-'}"
     )
+
+    # Narrative Brief at the top
+    _render_narrative_brief_panel(result)
 
     st.divider()
     st.subheader("KPIs")
@@ -624,8 +749,6 @@ def _render_risk_card(result) -> None:
     st.write(data.get("explanation") or "No explanation generated.")
     for insight in _insight_lines(data, signal_chart_df):
         st.markdown(f"- {insight}")
-
-    _render_narrative_brief_panel(result)
 
     st.divider()
     st.subheader("Signal Details")
@@ -802,12 +925,12 @@ def _render_business_report_tab() -> None:
         return
 
     st.caption(
-        "One-click report combining deterministic findings with an AI-written summary. "
-        "LLM sections are stubs until API credentials are available tomorrow."
+        "Generate a comprehensive professional business report with executive summary, "
+        "risk assessment, detailed findings, and actionable recommendations."
     )
 
-    if st.button("Generate Business Report", type="primary"):
-        with st.spinner("Building report..."):
+    if st.button("Generate Professional Business Report", type="primary"):
+        with st.spinner("Generating comprehensive business report..."):
             result = run_business_report(batch_results, portfolio_result)
         st.session_state["business_report"] = result
         st.session_state["business_report_prompt"] = _build_business_report_prompt(
@@ -825,59 +948,240 @@ def _render_business_report_tab() -> None:
             portfolio_result,
         )
 
-    st.subheader(report.get("document_classification", "FOR INFORMATION"))
-    st.caption("Placeholder for a future LLM-written Executive Briefing Note.")
+    # Header
+    st.markdown(f"### {report.get('report_title', 'Ghost Capacity Investigation Report')}")
+    st.caption(f"{report.get('document_classification', 'FOR INFORMATION')} | {report.get('ar_number', 'AR-2026-XXXX')} | {report.get('date', pd.Timestamp.now().date().isoformat())}")
+    st.caption(f"Prepared by: {report.get('prepared_by', 'Policy Analysis Unit')}")
 
-    st.markdown("**MINISTER BRIEFING NOTE**")
-    st.markdown(f"**AR #:** {report.get('ar_number', 'AR-2026-XXXX')}")
-
+    # Executive Summary
     st.divider()
-    st.markdown(f"**TOPIC:** {report.get('topic', 'N/A based on provided data.')}")
-    st.markdown(f"**PURPOSE:** {report.get('purpose', 'N/A based on provided data.')}")
+    st.subheader("Executive Summary")
+    exec_summary = report.get("executive_summary", "")
+    if exec_summary:
+        st.write(exec_summary)
+    else:
+        st.info("Executive summary not available.")
 
+    # Situation Overview
     st.divider()
-    st.markdown("**ISSUE**")
-    st.markdown(f"- {report.get('issue', 'N/A based on provided data.')}")
+    st.subheader("Situation Overview")
+    situation = report.get("situation_overview", {})
+    if situation:
+        if situation.get("scope"):
+            st.markdown("**Scope**")
+            st.write(situation["scope"])
+        if situation.get("scale"):
+            st.markdown("**Scale**")
+            st.write(situation["scale"])
+        if situation.get("context"):
+            st.markdown("**Context**")
+            st.write(situation["context"])
+    else:
+        st.info("Situation overview not available.")
 
-    st.markdown("**RECOMMENDATION / ADVICE**")
-    _render_briefing_bullets(report.get("recommendation_advice"))
-
+    # Key Findings
     st.divider()
-    st.markdown("**BACKGROUND**")
-    _render_briefing_bullets(report.get("background"))
+    st.subheader("Key Findings")
+    findings = report.get("key_findings", [])
+    if findings:
+        for i, finding in enumerate(findings, 1):
+            severity = finding.get("severity", "MEDIUM")
+            icon = SEVERITY_COLOUR.get(severity, "⚪")
+            with st.expander(f"{icon} Finding {i}: {finding.get('finding', 'N/A')[:80]}...", expanded=True):
+                st.markdown(f"**Severity:** {severity}")
+                st.markdown(f"**Evidence:** {finding.get('evidence', 'N/A')}")
+                st.markdown(f"**Implications:** {finding.get('implications', 'N/A')}")
+    else:
+        st.info("No key findings available.")
 
+    # Risk Assessment
     st.divider()
-    st.markdown("**CURRENT STATUS / KEY CONSIDERATIONS**")
-    _render_briefing_bullets(report.get("current_status_key_considerations"))
+    st.subheader("Risk Assessment")
+    risk = report.get("risk_assessment", {})
+    if risk:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown(f"**Overall Risk Level:** {risk.get('overall_risk_level', 'N/A')}")
+            st.markdown(f"**Financial Exposure:** {risk.get('financial_exposure', 'N/A')}")
+        with col2:
+            st.markdown(f"**Systemic Concerns:** {risk.get('systemic_concerns', 'N/A')}")
+            st.markdown(f"**Geographic Concentration:** {risk.get('geographic_concentration', 'N/A')}")
+        if risk.get("entity_type_patterns"):
+            st.markdown(f"**Entity Type Patterns:** {risk['entity_type_patterns']}")
+    else:
+        st.info("Risk assessment not available.")
 
+    # Detailed Analysis
     st.divider()
-    st.markdown("**COMMUNICATIONS**")
-    _render_briefing_bullets(report.get("communications"))
+    st.subheader("Detailed Analysis")
+    analysis = report.get("detailed_analysis", {})
+    if analysis:
+        if analysis.get("critical_entities"):
+            st.markdown("**Critical Entities**")
+            st.write(analysis["critical_entities"])
+        if analysis.get("high_risk_entities"):
+            st.markdown("**High-Risk Entities**")
+            st.write(analysis["high_risk_entities"])
+        if analysis.get("common_patterns"):
+            st.markdown("**Common Patterns**")
+            st.write(analysis["common_patterns"])
+        if analysis.get("outliers"):
+            st.markdown("**Outliers**")
+            st.write(analysis["outliers"])
+    else:
+        st.info("Detailed analysis not available.")
 
+    # Recommendations
     st.divider()
-    st.markdown("**ATTACHMENTS**")
-    _render_briefing_bullets(report.get("attachments"))
+    st.subheader("Recommendations")
+    recommendations = report.get("recommendations", [])
+    if recommendations:
+        for i, rec in enumerate(recommendations, 1):
+            priority = rec.get("priority", "MEDIUM")
+            priority_color = {"IMMEDIATE": "🔴", "SHORT-TERM": "🟡", "LONG-TERM": "🟢"}.get(priority, "⚪")
+            with st.expander(f"{priority_color} Recommendation {i} ({priority})", expanded=True):
+                st.markdown(f"**Action:** {rec.get('recommendation', 'N/A')}")
+                st.markdown(f"**Rationale:** {rec.get('rationale', 'N/A')}")
+                st.markdown(f"**Expected Outcome:** {rec.get('expected_outcome', 'N/A')}")
+                st.markdown(f"**Resources Required:** {rec.get('resources_required', 'N/A')}")
+    else:
+        st.info("No recommendations available.")
 
+    # Next Steps
     st.divider()
-    st.markdown(f"**CONTACT:** {report.get('contact', 'N/A based on provided data.')}")
-    st.markdown(f"**REVIEWED/APPROVED BY:** {report.get('reviewed_approved_by', 'N/A based on provided data.')}")
-    st.markdown(f"**DATE:** {pd.Timestamp.now().date().isoformat()}")
+    st.subheader("Next Steps")
+    next_steps = report.get("next_steps", {})
+    if next_steps:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**Immediate Actions**")
+            for action in next_steps.get("immediate_actions", []):
+                st.markdown(f"- {action}")
+        with col2:
+            st.markdown("**Follow-up Required**")
+            for followup in next_steps.get("follow_up_required", []):
+                st.markdown(f"- {followup}")
+        if next_steps.get("timeline"):
+            st.markdown(f"**Timeline:** {next_steps['timeline']}")
+    else:
+        st.info("Next steps not available.")
 
-    # ── Download ──────────────────────────────────────────────────────────────
-    md = _build_report_markdown(report)
-    st.download_button(
-        "Download Briefing Note (Markdown)",
-        data=md,
-        file_name="fundtrace-minister-briefing-note.md",
-        mime="text/markdown",
-        use_container_width=False,
-    )
+    # Limitations
+    if report.get("limitations"):
+        st.divider()
+        st.subheader("Limitations")
+        st.write(report["limitations"])
+
+    # Appendices
+    appendices = report.get("appendices", {})
+    if appendices:
+        st.divider()
+        with st.expander("Appendices", expanded=False):
+            if appendices.get("methodology"):
+                st.markdown("**Methodology**")
+                st.write(appendices["methodology"])
+            if appendices.get("data_sources"):
+                st.markdown("**Data Sources**")
+                for source in appendices["data_sources"]:
+                    st.markdown(f"- {source}")
+            if appendices.get("definitions"):
+                st.markdown("**Definitions**")
+                st.write(appendices["definitions"])
+
+    # Download
+    st.divider()
+    st.subheader("Export Report")
+    
+    # JSON export
+    json_data = json.dumps(report, indent=2, default=str)
+    
+    # Markdown export
+    md_lines = [
+        f"# {report.get('report_title', 'Ghost Capacity Investigation Report')}",
+        f"",
+        f"**{report.get('document_classification', 'FOR INFORMATION')}** | {report.get('ar_number', 'AR-2026-XXXX')} | {report.get('date', pd.Timestamp.now().date().isoformat())}",
+        f"Prepared by: {report.get('prepared_by', 'Policy Analysis Unit')}",
+        f"",
+        f"## Executive Summary",
+        f"",
+        report.get('executive_summary', 'N/A'),
+        f"",
+        f"## Situation Overview",
+        f"",
+    ]
+    
+    situation = report.get("situation_overview", {})
+    if situation:
+        md_lines.extend([
+            f"**Scope:** {situation.get('scope', 'N/A')}",
+            f"",
+            f"**Scale:** {situation.get('scale', 'N/A')}",
+            f"",
+            f"**Context:** {situation.get('context', 'N/A')}",
+            f"",
+        ])
+    
+    md_lines.append("## Key Findings\n")
+    for i, finding in enumerate(report.get("key_findings", []), 1):
+        md_lines.extend([
+            f"### Finding {i}: {finding.get('finding', 'N/A')}",
+            f"",
+            f"**Severity:** {finding.get('severity', 'N/A')}",
+            f"",
+            f"**Evidence:** {finding.get('evidence', 'N/A')}",
+            f"",
+            f"**Implications:** {finding.get('implications', 'N/A')}",
+            f"",
+        ])
+    
+    md_lines.append("## Recommendations\n")
+    for i, rec in enumerate(report.get("recommendations", []), 1):
+        md_lines.extend([
+            f"### Recommendation {i} ({rec.get('priority', 'N/A')})",
+            f"",
+            f"**Action:** {rec.get('recommendation', 'N/A')}",
+            f"",
+            f"**Rationale:** {rec.get('rationale', 'N/A')}",
+            f"",
+            f"**Expected Outcome:** {rec.get('expected_outcome', 'N/A')}",
+            f"",
+        ])
+    
+    md_content = "\n".join(md_lines)
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            "Download Report (JSON)",
+            data=json_data,
+            file_name="fundtrace-business-report.json",
+            mime="application/json",
+            use_container_width=True,
+        )
+    with col2:
+        st.download_button(
+            "Download Report (Markdown)",
+            data=md_content,
+            file_name="fundtrace-business-report.md",
+            mime="text/markdown",
+            use_container_width=True,
+        )
 
 
 def render_report() -> None:
     st.title("FundTrace")
     st.subheader("Report Mode")
     st.caption("Render structured risk reports from deterministic analysis, with optional LLM-written narrative.")
+    
+    # Report Automation Metrics
+    st.markdown("### Report Automation")
+    rm1, rm2, rm3, rm4 = st.columns(4)
+    rm1.metric("Report Scopes", "2", help="Entity-level and Aggregate dashboards available")
+    rm2.metric("Export Formats", "3", help="JSON, CSV, and Markdown exports")
+    rm3.metric("Briefing Sections", "10", help="Comprehensive business report structure")
+    rm4.metric("LLM-Ready Hooks", "4", help="AI-powered narrative generation points")
+    
+    st.divider()
 
     tab_entity_card, tab_business = st.tabs([
         "Dashboard",

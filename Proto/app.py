@@ -2,8 +2,11 @@ from pathlib import Path
 
 import streamlit as st
 
-from views import general, fetch, analyze, report
-from tools.preload import start_fetch_preload
+from views import general
+# OPTIMIZATION: Lazy load heavy view modules only when needed
+# from views import fetch, analyze, report
+# OPTIMIZATION: Lazy load preload only when needed
+# from tools.preload import start_fetch_preload
 
 PAGE_OPTIONS = [
     "Home",
@@ -19,16 +22,22 @@ SIDEBAR_ICON_PATH = Path(__file__).resolve().parent / "Gemini_Generated_Icon.png
 
 general.init_session_state()
 general.enforce_workflow_page()
-start_fetch_preload()
 
-# Warm the portfolio cache once per session so "Run Portfolio Analysis" is instant
-if "portfolio_cache_warmed" not in st.session_state:
-    st.session_state["portfolio_cache_warmed"] = True
-    try:
-        from views.analyze import _cached_run_portfolio_analysis
-        _cached_run_portfolio_analysis(0.0)
-    except Exception:
-        pass
+# OPTIMIZATION: Only start preload if user is on Fetch page or has flagged entities
+# This prevents heavy background queries on initial app load
+if st.session_state.get("page") in ["Fetch", "Flagged"] or st.session_state.get("flagged_list"):
+    from tools.preload import start_fetch_preload
+    start_fetch_preload()
+
+# OPTIMIZATION: Disable portfolio cache warming - it's too slow for startup
+# The cache will warm naturally when user first visits Analyze page
+# if "portfolio_cache_warmed" not in st.session_state:
+#     st.session_state["portfolio_cache_warmed"] = True
+#     try:
+#         from views.analyze import _cached_run_portfolio_analysis
+#         _cached_run_portfolio_analysis(0.0)
+#     except Exception:
+#         pass
 
 with st.sidebar:
     if SIDEBAR_ICON_PATH.exists():
@@ -82,12 +91,16 @@ general.render_workflow_notice()
 if page == "Home":
     general.render_home()
 elif page == "Fetch":
+    from views import fetch
     fetch.render_fetch()
 elif page == "Flagged":
+    from views import fetch
     fetch.render_flagged()
 elif page == "Analyze":
+    from views import analyze
     analyze.render_analyze()
 elif page == "Report":
+    from views import report
     report.render_report()
 elif page == "Zombie Context":
     general.render_zombie_context()

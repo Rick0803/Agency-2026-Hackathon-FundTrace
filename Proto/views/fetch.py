@@ -89,12 +89,13 @@ def _build_fetch_summary_prompt(
     breakdown_rows: list[dict],
 ) -> str:
     return (
-        f"You are an analyst summarizing a {method_name} scan for suspicious public-funding recipients. "
+        f"You are a senior policy analyst briefing executive stakeholders on a {method_name} scan for high-risk public-funding recipients. "
         f"Coverage: {coverage}. "
         f"Top results: {top_rows}. "
         f"Breakdown: {breakdown_rows}. "
-        "Write 2 short sentences for a non-technical reviewer. Mention scale, the strongest pattern, "
-        "and what should be reviewed next. Do not invent numbers."
+        "Write 3-4 sentences for executive decision-makers. Include: (1) scale and significance, "
+        "(2) the strongest risk pattern identified, (3) immediate implications for oversight, "
+        "and (4) recommended next action. Use clear, authoritative language. Do not invent numbers."
     )
 
 
@@ -105,11 +106,33 @@ def _fetch_scan_summary_placeholder(
     breakdown_rows: list[dict],
 ) -> str:
     """
-    Deterministic placeholder for a future LLM scan summary.
-
-    Replace the body with a real model call later, but keep the signature and
-    structured inputs stable so the UI does not need to change.
+    LLM-powered scan summary with deterministic fallback.
+    
+    Calls the LLM to generate a natural-language summary of scan results.
+    Falls back to deterministic output if LLM is unavailable.
     """
+    from agent.llm_client import call_llm
+    
+    # Build the prompt
+    prompt = _build_fetch_summary_prompt(method_name, coverage, top_rows, breakdown_rows)
+    
+    # Try LLM call
+    llm_response = call_llm(
+        system_prompt=(
+            "You are a senior policy analyst briefing executive stakeholders on scan results for high-risk public-funding recipients. "
+            "Write 3-4 sentences for executive decision-makers. Include: (1) scale and significance, "
+            "(2) the strongest risk pattern identified, (3) immediate implications for oversight, "
+            "and (4) recommended next action. Use clear, authoritative language suitable for senior government officials. "
+            "Do not invent numbers. Be concise and objective."
+        ),
+        user_prompt=prompt,
+        max_tokens=250,
+    )
+    
+    if llm_response:
+        return llm_response.strip()
+    
+    # Fallback to deterministic output
     flagged = int(coverage.get("flagged_entities", 0))
     scanned = int(coverage.get("entities_scanned", 0))
     shown = int(coverage.get("shown_entities", flagged))
@@ -144,7 +167,6 @@ def _render_fetch_summary_advisor(
     prompt = _build_fetch_summary_prompt(method_name, coverage, top_rows, breakdown_rows)
     with st.expander("AI Summary", expanded=True):
         st.info(summary)
-        st.caption("Placeholder for a future LLM-generated scan summary.")
         st.session_state[f"{method_name}_scan_summary_prompt"] = prompt
 
 
@@ -325,6 +347,16 @@ def _render_way1() -> None:
         "funding and filing patterns. Users can adjust key thresholds before running the scan, so the "
         "rules reflect the review context rather than a fixed black-box setting."
     )
+    
+    # Detection Framework Metrics
+    st.markdown("### Detection Framework")
+    fm1, fm2, fm3, fm4 = st.columns(4)
+    fm1.metric("Rules", "10", help="Configurable zombie-recipient detection rules")
+    fm2.metric("Models", "3", help="Anomaly detection methods available (ECOD, Isolation Forest, LOF)")
+    fm3.metric("Features", "13+", help="Entity-level risk features for ML scoring")
+    fm4.metric("Peer Grouping", "Yes", help="Scoring by entity type + funding band for fair comparison")
+    
+    st.divider()
 
     with st.expander("The 10 Rules", expanded=True):
         st.markdown(
@@ -438,13 +470,44 @@ ceased operations or never meaningfully delivered on that funding.
     n_five    = int((zombie_df["rules_triggered"] >= 5).sum())
     pct_three = n_three / total_entities * 100 if total_entities else 0
     pct_five  = n_five  / total_entities * 100 if total_entities else 0
+    
+    # Calculate potential funding exposure
+    potential_exposure = safe_sum(zombie_df, "fed_total")
+
+    # Prepare data for AI summary
+    breakdown = pd.DataFrame({
+        "Rule":  rule_labels,
+        "Count": [int(zombie_df[c].sum()) for c in flag_cols],
+    })
+    breakdown["% of flagged"] = (breakdown["Count"] / n_flagged * 100).map(lambda v: f"{v:.1f}%")
+    
+    coverage = {
+        "entities_scanned": total_entities,
+        "flagged_entities": n_flagged,
+        "shown_entities": min(len(zombie_df), 5),
+    }
+    summary_top_rows = zombie_df.head(5)[["canonical_name", "rules_triggered", "province", "fed_total"]].rename(
+        columns={
+            "canonical_name": "Organization",
+            "rules_triggered": "Rules triggered",
+            "province": "Province",
+            "fed_total": "Federal funding",
+        }
+    ).to_dict(orient="records")
+    breakdown_rows = breakdown.to_dict(orient="records")
+
+    # AI Summary at the top
+    st.divider()
+    _render_fetch_summary_advisor("User-Defined Rules", coverage, summary_top_rows, breakdown_rows)
 
     # Coverage card
     st.divider()
     st.subheader("Coverage")
-    cov1, cov2 = st.columns(2)
+    cov1, cov2, cov3 = st.columns(3)
     cov1.metric("Entities Scanned", f"{total_entities:,}")
     cov2.metric("Flag rate",        f"{pct:.1f}%")
+    cov3.metric("Potential Funding Exposure", f"${potential_exposure:,.0f}", 
+                help="Total federal funding across all shortlisted entities")
 
     m1, m2, m3 = st.columns(3)
     m1.metric("Shortlisted (≥1 Rule)", f"{n_flagged:,}", f"{pct:.1f}% of Scanned")
@@ -470,31 +533,8 @@ ceased operations or never meaningfully delivered on that funding.
 
     with col_table:
         st.subheader("Rule Breakdown")
-        breakdown = pd.DataFrame({
-            "Rule":  rule_labels,
-            "Count": [int(zombie_df[c].sum()) for c in flag_cols],
-        })
-        breakdown["% of flagged"] = (breakdown["Count"] / n_flagged * 100).map(lambda v: f"{v:.1f}%")
         st.dataframe(breakdown, use_container_width=True, hide_index=True)
         st.caption("How many flagged entities each rule contributed to.")
-
-    coverage = {
-        "entities_scanned": total_entities,
-        "flagged_entities": n_flagged,
-        "shown_entities": min(len(zombie_df), 5),
-    }
-    summary_top_rows = zombie_df.head(5)[["canonical_name", "rules_triggered", "province", "fed_total"]].rename(
-        columns={
-            "canonical_name": "Organization",
-            "rules_triggered": "Rules triggered",
-            "province": "Province",
-            "fed_total": "Federal funding",
-        }
-    ).to_dict(orient="records")
-    breakdown_rows = breakdown.to_dict(orient="records")
-
-    st.divider()
-    _render_fetch_summary_advisor("User-Defined Rules", coverage, summary_top_rows, breakdown_rows)
 
     # Detailed results table with checkboxes
     st.divider()
@@ -920,6 +960,16 @@ def _render_way2() -> None:
         "and capacity patterns differ from comparable peers. Instead of checking one rule at a time, "
         "the algorithm considers multiple signals together and prioritizes entities that deserve closer review."
     )
+    
+    # Detection Framework Metrics
+    st.markdown("### Detection Framework")
+    fm1, fm2, fm3, fm4 = st.columns(4)
+    fm1.metric("Rules", "10", help="User-defined rules used as domain knowledge features")
+    fm2.metric("Models", "3", help="Anomaly detection methods (ECOD, Isolation Forest, LOF)")
+    fm3.metric("Features", "13+", help="Entity-level risk features for ML scoring")
+    fm4.metric("Peer Grouping", "Yes", help="Scoring by entity type + funding band for fair comparison")
+    
+    st.divider()
 
     with st.expander("How This Method Works", expanded=True):
         st.markdown(
@@ -1007,14 +1057,49 @@ Groups smaller than 15 entities fall back to global scoring.
         return
 
     top_df = way2_df.head(int(max_results_w2))
+    
+    # Calculate potential funding exposure
+    potential_exposure_w2 = safe_sum(top_df, "fed_total")
+
+    # Prepare data for AI summary
+    rule_dist = (
+        top_df["rules_triggered"]
+        .apply(lambda v: int(float(v)))
+        .value_counts()
+        .sort_index()
+        .reset_index()
+    )
+    rule_dist.columns = ["Rules triggered", "Entities"]
+    rule_dist["Rules triggered"] = rule_dist["Rules triggered"].astype(str)
+    
+    coverage = {
+        "entities_scored": len(way2_df),
+        "flagged_entities": len(top_df),
+        "shown_entities": len(top_df),
+    }
+    summary_top_rows = top_df.head(5)[["canonical_name", "anomaly_score", "rules_triggered", "province"]].rename(
+        columns={
+            "canonical_name": "Organization",
+            "anomaly_score": "Anomaly score",
+            "rules_triggered": "Rules triggered",
+            "province": "Province",
+        }
+    ).to_dict(orient="records")
+    breakdown_rows = rule_dist.to_dict(orient="records")
+
+    # AI Summary at the top
+    st.divider()
+    _render_fetch_summary_advisor("Anomaly Detection (AI)", coverage, summary_top_rows, breakdown_rows)
 
     # Metrics
     st.divider()
     st.subheader("Coverage")
-    m1, m3, m4 = st.columns(3)
+    m1, m2, m3, m4 = st.columns(4)
     m1.metric("Entities Scored",  f"{len(way2_df):,}")
-    m3.metric("Model",            st.session_state.get("way2_model", "—"))
-    m4.metric("Shown",            f"{len(top_df):,}")
+    m2.metric("Model",            st.session_state.get("way2_model", "—"))
+    m3.metric("Shown",            f"{len(top_df):,}")
+    m4.metric("Potential Funding Exposure", f"${potential_exposure_w2:,.0f}",
+              help="Total federal funding across top displayed anomalies")
 
     # Score distribution
     col_hist, col_rules = st.columns(2)
@@ -1032,35 +1117,8 @@ Groups smaller than 15 entities fall back to global scoring.
 
     with col_rules:
         st.subheader("Top Anomalies: Rules Triggered")
-        rule_dist = (
-            top_df["rules_triggered"]
-            .apply(lambda v: int(float(v)))
-            .value_counts()
-            .sort_index()
-            .reset_index()
-        )
-        rule_dist.columns = ["Rules triggered", "Entities"]
-        rule_dist["Rules triggered"] = rule_dist["Rules triggered"].astype(str)
         st.altair_chart(_labeled_bar_chart(rule_dist, "Rules triggered", "Entities", height=250), use_container_width=True)
         st.caption(f"How many user-defined rules each top-{len(top_df)} anomaly triggered.")
-
-    coverage = {
-        "entities_scored": len(way2_df),
-        "flagged_entities": len(top_df),
-        "shown_entities": len(top_df),
-    }
-    summary_top_rows = top_df.head(5)[["canonical_name", "anomaly_score", "rules_triggered", "province"]].rename(
-        columns={
-            "canonical_name": "Organization",
-            "anomaly_score": "Anomaly score",
-            "rules_triggered": "Rules triggered",
-            "province": "Province",
-        }
-    ).to_dict(orient="records")
-    breakdown_rows = rule_dist.to_dict(orient="records")
-
-    st.divider()
-    _render_fetch_summary_advisor("Anomaly Detection (AI)", coverage, summary_top_rows, breakdown_rows)
 
     # Results table with checkboxes — sorted by rules triggered desc, then anomaly score desc
     top_df = top_df.sort_values(

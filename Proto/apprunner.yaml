@@ -1,0 +1,24 @@
+# AWS App Runner configuration file
+# This file defines the build and runtime configuration for App Runner
+
+version: 1.0
+runtime: python3
+build:
+  commands:
+    pre-build:
+      - echo "Installing dependencies..."
+    build:
+      - pip install -r requirements.txt
+    post-build:
+      - echo "Build complete"
+run:
+  runtime-version: 3.11
+  command: streamlit run app.py --server.port=8080 --server.address=0.0.0.0
+  network:
+    port: 8080
+    env: APP_PORT
+  env:
+    - name: STREAMLIT_SERVER_HEADLESS
+      value: "true"
+    - name: STREAMLIT_BROWSER_GATHER_USAGE_STATS
+      value: "false"

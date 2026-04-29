@@ -45,32 +45,45 @@ def _build_summary_prompt(batch_results: list, portfolio_result: dict) -> str:
         if top else "No entities analyzed."
     )
     return (
-        f"You are a federal funding analyst reviewing {total} flagged non-profit organizations "
-        f"for ghost capacity — operations that consume public funding without delivering services. "
-        f"Findings: {critical} CRITICAL, {high} HIGH, average ghost score {avg_score:.3f}. "
+        f"You are a senior policy analyst briefing executive stakeholders on a ghost capacity investigation. "
+        f"Findings: {total} flagged organizations analyzed, {critical} CRITICAL, {high} HIGH, average ghost score {avg_score:.3f}. "
         f"{top_line}. "
         f"Universe context: {univ_total:,} funded organizations total, {univ_risky:,} flagged in universe. "
-        f"Write exactly one sentence (under 40 words) summarizing the key risk signal for a non-technical audience."
+        f"Write 3-4 sentences for executive decision-makers. Include: (1) the severity and scale of findings, "
+        f"(2) the most concerning entity and why, (3) systemic patterns if any, "
+        f"and (4) recommended immediate action. Use authoritative language suitable for senior government officials."
     )
 
 
 def _llm_analysis_summary(batch_results: list, portfolio_result: dict) -> str:
     """
     Returns a one-sentence plain-English summary of the analysis findings.
-
-    STUB — generates a deterministic message from the data.
-    Replace the body below with:
-
-        import anthropic
-        client = anthropic.Anthropic()
-        prompt = _build_summary_prompt(batch_results, portfolio_result)
-        msg = client.messages.create(
-            model="claude-opus-4-7",
-            max_tokens=80,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        return msg.content[0].text.strip()
+    
+    Calls the LLM to generate a summary with deterministic fallback.
     """
+    from agent.llm_client import call_llm
+    
+    # Build the prompt
+    prompt = _build_summary_prompt(batch_results, portfolio_result)
+    
+    # Try LLM call
+    llm_response = call_llm(
+        system_prompt=(
+            "You are a senior policy analyst briefing executive stakeholders on a ghost capacity investigation. "
+            "Ghost capacity = organizations consuming public funding without delivering services. "
+            "Write 3-4 sentences for executive decision-makers. Include: (1) the severity and scale of findings, "
+            "(2) the most concerning entity and why, (3) systemic patterns if any, "
+            "(4) recommended immediate action. Use authoritative language suitable for senior government officials. "
+            "Be concise, objective, and grounded in the provided data."
+        ),
+        user_prompt=prompt,
+        max_tokens=250,
+    )
+    
+    if llm_response:
+        return llm_response.strip()
+    
+    # Fallback to deterministic output
     total     = len(batch_results)
     critical  = sum(1 for r in batch_results if r.overall_risk == "CRITICAL")
     high      = sum(1 for r in batch_results if r.overall_risk == "HIGH")
@@ -96,7 +109,6 @@ def _render_analysis_summary_block(batch_results: list, portfolio_result: dict) 
     summary = _llm_analysis_summary(batch_results, portfolio_result)
     prompt = _build_summary_prompt(batch_results, portfolio_result)
     st.info(f"**Analysis Summary** — {summary}")
-    st.caption("Placeholder for a future LLM-generated portfolio summary.")
     st.session_state["analysis_summary_prompt"] = prompt
 
 
@@ -236,19 +248,23 @@ def _render_combined_analysis(batch_results: list, portfolio_result: dict) -> No
     critical_count = sum(1 for r in batch_results if r.overall_risk == "CRITICAL")
     high_count     = sum(1 for r in batch_results if r.overall_risk == "HIGH")
     avg_ghost      = sum(r.ghost_score for r in batch_results) / max(len(batch_results), 1)
+    total_fed      = sum(r.fed_total for r in batch_results)
+    total_gap      = sum(r.funding_gap for r in batch_results)
 
-    m1, m2, m3, m4 = st.columns(4)
+    m1, m2, m3, m4, m5 = st.columns(5)
     m1.metric("Analyzed", len(batch_results),
               help="Total flagged entities scored in this run.")
-    m2.metric("CRITICAL", critical_count,
-              help="Ghost score ≥ 0.8 — strongest evidence of ghost capacity.")
-    m3.metric("HIGH", high_count,
-              help="Ghost score 0.6–0.8 — probable ghost pattern, warrants review.")
-    m4.metric("Avg Ghost Score", f"{avg_ghost:.3f}",
+    m2.metric("CRITICAL / HIGH", f"{critical_count + high_count}",
+              help="Entities with ghost score ≥ 0.6 requiring immediate review.")
+    m3.metric("Avg Ghost Score", f"{avg_ghost:.3f}",
               help="Weighted composite 0–1 across five dimensions: "
                    "government revenue dependency (25%), program delivery deficit (30%), "
                    "compensation burden (20%), pass-through transfers (15%), no employees (10%). "
                    "0–0.3 low · 0.3–0.6 medium · 0.6–0.8 high · 0.8–1.0 critical.")
+    m4.metric("Federal Funding Reviewed", f"${total_fed:,.0f}",
+              help="Total federal funding across all analyzed entities.")
+    m5.metric("Combined Funding Gap", f"${total_gap:,.0f}",
+              help="Total funding gap (federal grants minus CRA program spend) across analyzed entities.")
 
     st.caption("Ranked by ghost score — higher means stronger ghost capacity signals.")
     st.dataframe(_batch_results_df(batch_results), use_container_width=True, hide_index=True)
