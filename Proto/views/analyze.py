@@ -320,7 +320,7 @@ def _render_combined_analysis(batch_results: list, portfolio_result: dict) -> No
 
     if batch_results:
         top = max(batch_results, key=lambda x: x.ghost_score)
-        st.markdown("**Highest-risk finding**")
+        st.subheader("Highest-Risk Finding")
         h1, h2, h3 = st.columns(3)
         h1.metric("Organization", top.canonical_name)
         h2.metric("Risk Label", top.overall_risk,

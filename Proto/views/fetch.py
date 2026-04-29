@@ -299,6 +299,16 @@ known organization in the entity registry — these are typically malformed or m
     if "fetch_active_method" not in st.session_state:
         st.session_state["fetch_active_method"] = "User-Defined Rules"
 
+    st.markdown(
+        "<style>"
+        "div[data-testid='stRadio'] label {"
+        "  font-size: 1.15rem !important;"
+        "  font-weight: 700 !important;"
+        "  letter-spacing: 0.01em;"
+        "}"
+        "</style>",
+        unsafe_allow_html=True,
+    )
     active_method = st.radio(
         "Scan Method",
         options=["User-Defined Rules", "Anomaly Detection (AI)"],

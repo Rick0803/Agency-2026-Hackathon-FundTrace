@@ -56,6 +56,11 @@ def _pct(value) -> str:
         return "-"
 
 
+def _mds(text) -> str:
+    """Escape dollar signs so st.markdown/st.write don't treat them as LaTeX."""
+    return str(text).replace("$", r"\$")
+
+
 def _compact(value) -> str:
     return "-" if value in (None, "", []) else str(value)
 
@@ -343,10 +348,10 @@ def _render_narrative_brief_panel(result) -> None:
     brief_data = _to_plain(brief)
     st.divider()
     st.subheader("Narrative Brief")
-    st.info(brief_data.get("summary", "No narrative generated."))
+    st.info(_mds(brief_data.get("summary", "No narrative generated.")))
     if brief_data.get("recommended_actions"):
         for action in brief_data["recommended_actions"]:
-            st.markdown(f"- {action}")
+            st.markdown(f"- {_mds(action)}")
     st.session_state["narrative_brief_prompt"] = prompt
 
 
@@ -442,18 +447,7 @@ def _render_aggregate_executive_narrative(df: pd.DataFrame, results: list, high_
         )
     
     st.subheader("Executive Summary")
-    st.info(narrative)
-
-
-def _render_briefing_bullets(items) -> None:
-    if isinstance(items, list) and items:
-        for item in items:
-            st.markdown(f"- {item}")
-        return
-    if items:
-        st.markdown(f"- {items}")
-        return
-    st.markdown("- N/A based on provided data.")
+    st.info(_mds(narrative))
 
 
 def _render_aggregate_dashboard(results: list) -> None:
@@ -572,7 +566,7 @@ def _render_aggregate_dashboard(results: list) -> None:
         f"with a ghost score of {top_entity.get('ghost_score', 0):.3f}."
     )
     if df["funding_gap"].sum() > 0:
-        st.markdown(f"- Combined funding gap across analyzed entities is {_money(df['funding_gap'].sum())}.")
+        st.markdown(f"- Combined funding gap across analyzed entities is {_mds(_money(df['funding_gap'].sum()))}.")
     if df["avg_gov_dependency"].mean() >= 0.80:
         st.markdown("- The aggregate set shows very high government revenue dependency.")
 
@@ -746,9 +740,9 @@ def _render_risk_card(result) -> None:
 
     st.divider()
     st.subheader("Key Ideas")
-    st.write(data.get("explanation") or "No explanation generated.")
+    st.write(_mds(data.get("explanation") or "No explanation generated."))
     for insight in _insight_lines(data, signal_chart_df):
-        st.markdown(f"- {insight}")
+        st.markdown(f"- {_mds(insight)}")
 
     st.divider()
     st.subheader("Signal Details")
@@ -811,7 +805,7 @@ def _render_narrative_tab(result) -> None:
     icon = SEVERITY_COLOUR.get(brief_data.get("overall_risk"), "⚪")
     st.subheader(f"{icon} {brief_data.get('entity', 'Unknown')} — {brief_data.get('overall_risk', 'UNKNOWN')} RISK")
     st.caption(f"Confidence: {brief_data.get('confidence', '-')}")
-    st.write(brief_data.get("summary", ""))
+    st.write(_mds(brief_data.get("summary", "")))
 
     col_sig, col_actions = st.columns([2, 1])
     with col_sig:
@@ -819,11 +813,11 @@ def _render_narrative_tab(result) -> None:
         for signal in brief_data.get("signals") or []:
             colour = SEVERITY_COLOUR.get(signal.get("severity"), "⚪")
             st.markdown(f"**{colour} {signal.get('label', '')}** `{signal.get('severity', '')}`")
-            st.caption(signal.get("evidence", ""))
+            st.caption(_mds(signal.get("evidence", "")))
     with col_actions:
         st.markdown("**Recommended Actions**")
         for i, action in enumerate(brief_data.get("recommended_actions") or [], 1):
-            st.markdown(f"{i}. {action}")
+            st.markdown(f"{i}. {_mds(action)}")
         if brief_data.get("limitations"):
             st.markdown("**Limitations**")
             st.caption(brief_data["limitations"])
@@ -1165,7 +1159,7 @@ def _render_business_report_tab() -> None:
     st.subheader("Executive Summary")
     exec_summary = report.get("executive_summary", "")
     if exec_summary:
-        st.write(exec_summary)
+        st.write(_mds(exec_summary))
     else:
         st.info("Executive summary not available.")
 
@@ -1176,13 +1170,13 @@ def _render_business_report_tab() -> None:
     if situation:
         if situation.get("scope"):
             st.markdown("**Scope**")
-            st.write(situation["scope"])
+            st.write(_mds(situation["scope"]))
         if situation.get("scale"):
             st.markdown("**Scale**")
-            st.write(situation["scale"])
+            st.write(_mds(situation["scale"]))
         if situation.get("context"):
             st.markdown("**Context**")
-            st.write(situation["context"])
+            st.write(_mds(situation["context"]))
     else:
         st.info("Situation overview not available.")
 
@@ -1196,8 +1190,8 @@ def _render_business_report_tab() -> None:
             icon = SEVERITY_COLOUR.get(severity, "⚪")
             with st.expander(f"{icon} Finding {i}: {finding.get('finding', 'N/A')[:80]}...", expanded=True):
                 st.markdown(f"**Severity:** {severity}")
-                st.markdown(f"**Evidence:** {finding.get('evidence', 'N/A')}")
-                st.markdown(f"**Implications:** {finding.get('implications', 'N/A')}")
+                st.markdown(f"**Evidence:** {_mds(finding.get('evidence', 'N/A'))}")
+                st.markdown(f"**Implications:** {_mds(finding.get('implications', 'N/A'))}")
     else:
         st.info("No key findings available.")
 
@@ -1208,13 +1202,13 @@ def _render_business_report_tab() -> None:
     if risk:
         col1, col2 = st.columns(2)
         with col1:
-            st.markdown(f"**Overall Risk Level:** {risk.get('overall_risk_level', 'N/A')}")
-            st.markdown(f"**Financial Exposure:** {risk.get('financial_exposure', 'N/A')}")
+            st.markdown(f"**Overall Risk Level:** {_mds(risk.get('overall_risk_level', 'N/A'))}")
+            st.markdown(f"**Financial Exposure:** {_mds(risk.get('financial_exposure', 'N/A'))}")
         with col2:
-            st.markdown(f"**Systemic Concerns:** {risk.get('systemic_concerns', 'N/A')}")
-            st.markdown(f"**Geographic Concentration:** {risk.get('geographic_concentration', 'N/A')}")
+            st.markdown(f"**Systemic Concerns:** {_mds(risk.get('systemic_concerns', 'N/A'))}")
+            st.markdown(f"**Geographic Concentration:** {_mds(risk.get('geographic_concentration', 'N/A'))}")
         if risk.get("entity_type_patterns"):
-            st.markdown(f"**Entity Type Patterns:** {risk['entity_type_patterns']}")
+            st.markdown(f"**Entity Type Patterns:** {_mds(risk['entity_type_patterns'])}")
     else:
         st.info("Risk assessment not available.")
 
@@ -1225,16 +1219,16 @@ def _render_business_report_tab() -> None:
     if analysis:
         if analysis.get("critical_entities"):
             st.markdown("**Critical Entities**")
-            st.write(analysis["critical_entities"])
+            st.write(_mds(analysis["critical_entities"]))
         if analysis.get("high_risk_entities"):
             st.markdown("**High-Risk Entities**")
-            st.write(analysis["high_risk_entities"])
+            st.write(_mds(analysis["high_risk_entities"]))
         if analysis.get("common_patterns"):
             st.markdown("**Common Patterns**")
-            st.write(analysis["common_patterns"])
+            st.write(_mds(analysis["common_patterns"]))
         if analysis.get("outliers"):
             st.markdown("**Outliers**")
-            st.write(analysis["outliers"])
+            st.write(_mds(analysis["outliers"]))
     else:
         st.info("Detailed analysis not available.")
 
@@ -1247,10 +1241,10 @@ def _render_business_report_tab() -> None:
             priority = rec.get("priority", "MEDIUM")
             priority_color = {"IMMEDIATE": "🔴", "SHORT-TERM": "🟡", "LONG-TERM": "🟢"}.get(priority, "⚪")
             with st.expander(f"{priority_color} Recommendation {i} ({priority})", expanded=True):
-                st.markdown(f"**Action:** {rec.get('recommendation', 'N/A')}")
-                st.markdown(f"**Rationale:** {rec.get('rationale', 'N/A')}")
-                st.markdown(f"**Expected Outcome:** {rec.get('expected_outcome', 'N/A')}")
-                st.markdown(f"**Resources Required:** {rec.get('resources_required', 'N/A')}")
+                st.markdown(f"**Action:** {_mds(rec.get('recommendation', 'N/A'))}")
+                st.markdown(f"**Rationale:** {_mds(rec.get('rationale', 'N/A'))}")
+                st.markdown(f"**Expected Outcome:** {_mds(rec.get('expected_outcome', 'N/A'))}")
+                st.markdown(f"**Resources Required:** {_mds(rec.get('resources_required', 'N/A'))}")
     else:
         st.info("No recommendations available.")
 
@@ -1263,13 +1257,13 @@ def _render_business_report_tab() -> None:
         with col1:
             st.markdown("**Immediate Actions**")
             for action in next_steps.get("immediate_actions", []):
-                st.markdown(f"- {action}")
+                st.markdown(f"- {_mds(action)}")
         with col2:
             st.markdown("**Follow-up Required**")
             for followup in next_steps.get("follow_up_required", []):
-                st.markdown(f"- {followup}")
+                st.markdown(f"- {_mds(followup)}")
         if next_steps.get("timeline"):
-            st.markdown(f"**Timeline:** {next_steps['timeline']}")
+            st.markdown(f"**Timeline:** {_mds(next_steps['timeline'])}")
     else:
         st.info("Next steps not available.")
 
@@ -1277,7 +1271,7 @@ def _render_business_report_tab() -> None:
     if report.get("limitations"):
         st.divider()
         st.subheader("Limitations")
-        st.write(report["limitations"])
+        st.write(_mds(report["limitations"]))
 
     # Appendices
     appendices = report.get("appendices", {})
@@ -1286,14 +1280,14 @@ def _render_business_report_tab() -> None:
         with st.expander("Appendices", expanded=False):
             if appendices.get("methodology"):
                 st.markdown("**Methodology**")
-                st.write(appendices["methodology"])
+                st.write(_mds(appendices["methodology"]))
             if appendices.get("data_sources"):
                 st.markdown("**Data Sources**")
                 for source in appendices["data_sources"]:
-                    st.markdown(f"- {source}")
+                    st.markdown(f"- {_mds(source)}")
             if appendices.get("definitions"):
                 st.markdown("**Definitions**")
-                st.write(appendices["definitions"])
+                st.write(_mds(appendices["definitions"]))
 
     # Download
     st.divider()
