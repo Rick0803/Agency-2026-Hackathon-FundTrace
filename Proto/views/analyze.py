@@ -157,7 +157,7 @@ def _render_analysis_summary_block(batch_results: list, portfolio_result: dict) 
     prompt = _build_summary_prompt(batch_results, portfolio_result)
     with st.container(border=True):
         st.markdown("**Executive Analysis Summary**")
-        st.write(summary)
+        st.markdown(summary.replace("$", r"\$"))
     st.session_state["analysis_summary_prompt"] = prompt
 
 
