@@ -920,11 +920,32 @@ def _generate_pdf_report(report: dict) -> bytes:
     """Render the business report dict as a formatted PDF using fpdf2."""
     from fpdf import FPDF
 
+    # Helvetica (Latin-1 core font) can't encode Unicode beyond U+00FF.
+    # Map the common offenders to ASCII equivalents before any text hits fpdf.
+    _UNICODE_MAP = str.maketrans({
+        "—": "-",   # em dash
+        "–": "-",   # en dash
+        "‘": "'",   # left single quote
+        "’": "'",   # right single quote
+        "“": '"',   # left double quote
+        "”": '"',   # right double quote
+        "•": "*",   # bullet
+        "…": "...", # ellipsis
+        "·": "*",   # middle dot
+        "’": "'",   # apostrophe variant
+        " ": " ",   # non-breaking space
+    })
+
+    def _safe(text) -> str:
+        s = str(text).translate(_UNICODE_MAP)
+        # Drop anything still outside Latin-1
+        return s.encode("latin-1", errors="replace").decode("latin-1")
+
     class _PDF(FPDF):
         def header(self):
             self.set_font("Helvetica", "B", 9)
             self.set_text_color(120, 120, 120)
-            self.cell(0, 6, "FundTrace — Ghost Capacity Investigation Report", align="R")
+            self.cell(0, 6, "FundTrace - Ghost Capacity Investigation Report", align="R")
             self.ln(4)
             self.set_draw_color(200, 200, 200)
             self.line(self.l_margin, self.get_y(), self.w - self.r_margin, self.get_y())
@@ -935,7 +956,7 @@ def _generate_pdf_report(report: dict) -> bytes:
             self.set_y(-12)
             self.set_font("Helvetica", "I", 8)
             self.set_text_color(150, 150, 150)
-            self.cell(0, 6, f"Page {self.page_no()} | CONFIDENTIAL — FOR INTERNAL USE ONLY", align="C")
+            self.cell(0, 6, f"Page {self.page_no()} | CONFIDENTIAL - FOR INTERNAL USE ONLY", align="C")
 
     pdf = _PDF()
     pdf.set_margins(18, 18, 18)
@@ -945,7 +966,7 @@ def _generate_pdf_report(report: dict) -> bytes:
     def _h1(text: str) -> None:
         pdf.set_font("Helvetica", "B", 16)
         pdf.set_text_color(30, 58, 95)
-        pdf.multi_cell(0, 9, text)
+        pdf.multi_cell(0, 9, _safe(text))
         pdf.set_text_color(0, 0, 0)
         pdf.ln(1)
 
@@ -955,7 +976,7 @@ def _generate_pdf_report(report: dict) -> bytes:
         pdf.set_draw_color(30, 58, 95)
         pdf.line(pdf.l_margin, pdf.get_y() + 1, pdf.w - pdf.r_margin, pdf.get_y() + 1)
         pdf.ln(3)
-        pdf.multi_cell(0, 7, text)
+        pdf.multi_cell(0, 7, _safe(text))
         pdf.set_text_color(0, 0, 0)
         pdf.set_draw_color(0, 0, 0)
         pdf.ln(1)
@@ -963,25 +984,25 @@ def _generate_pdf_report(report: dict) -> bytes:
     def _h3(text: str) -> None:
         pdf.set_font("Helvetica", "B", 10)
         pdf.set_text_color(60, 60, 60)
-        pdf.multi_cell(0, 6, text)
+        pdf.multi_cell(0, 6, _safe(text))
         pdf.set_text_color(0, 0, 0)
 
     def _body(text: str) -> None:
         pdf.set_font("Helvetica", "", 10)
-        pdf.multi_cell(0, 5.5, str(text))
+        pdf.multi_cell(0, 5.5, _safe(text))
         pdf.ln(2)
 
     def _label_value(label: str, value: str) -> None:
         pdf.set_font("Helvetica", "B", 10)
-        pdf.write(5.5, f"{label}: ")
+        pdf.write(5.5, _safe(f"{label}: "))
         pdf.set_font("Helvetica", "", 10)
-        pdf.write(5.5, str(value))
+        pdf.write(5.5, _safe(value))
         pdf.ln(6)
 
     def _bullet(text: str) -> None:
         pdf.set_font("Helvetica", "", 10)
         pdf.set_x(pdf.l_margin + 4)
-        pdf.multi_cell(0, 5.5, f"•  {text}")
+        pdf.multi_cell(0, 5.5, _safe(f"-  {text}"))
         pdf.ln(1)
 
     # ── Title block ──────────────────────────────────────────────────────────
