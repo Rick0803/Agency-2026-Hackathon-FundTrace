@@ -46,7 +46,7 @@ with st.sidebar:
         "<div style='margin-top:-0.5rem; margin-bottom:0.15rem; font-size:2rem; font-weight:700;'>FundTrace</div>",
         unsafe_allow_html=True,
     )
-    st.caption("Track public funding. Surface ghost recipients.")
+    st.caption("Track public funding. Surface zombie & ghost recipients.")
     st.divider()
     st.markdown(
         "<div style='text-align:center; font-size:1.5rem; font-weight:700; margin-bottom:0.5rem;'>Workflow</div>",
