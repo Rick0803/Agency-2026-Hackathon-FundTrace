@@ -9,7 +9,7 @@ from dataclasses import asdict, is_dataclass
 
 from agent.orchestrator import (
     run_entity_batch_analysis,
-    run_portfolio_analysis,
+    run_portfolio_analysis as _run_portfolio_analysis,
 )
 from views.general import (
     SEVERITY_COLOUR,
@@ -18,24 +18,97 @@ from views.general import (
 )
 
 
-# ─── Local chart helper (mirrors _labeled_bar_chart in fetch.py) ───────────────
+@st.cache_data(ttl=3600, show_spinner=False)
+def _cached_run_portfolio_analysis(min_fed_total: float) -> dict:
+    return _run_portfolio_analysis(min_fed_total=min_fed_total)
+
+
+# ─── LLM summary (placeholder) ────────────────────────────────────────────────
+# TODO: replace _build_summary_prompt + the stub body of _llm_analysis_summary
+# with a real Anthropic API call once credentials are available.
+# The function signature, inputs, and display block below should stay unchanged.
+
+def _build_summary_prompt(batch_results: list, portfolio_result: dict) -> str:
+    """Constructs the prompt that will be sent to the LLM."""
+    total      = len(batch_results)
+    critical   = sum(1 for r in batch_results if r.overall_risk == "CRITICAL")
+    high       = sum(1 for r in batch_results if r.overall_risk == "HIGH")
+    avg_score  = sum(r.ghost_score for r in batch_results) / max(total, 1)
+    top        = max(batch_results, key=lambda r: r.ghost_score) if batch_results else None
+    stats      = portfolio_result.get("portfolio", {})
+    by_prov    = stats.get("by_province", pd.DataFrame())
+    univ_total = portfolio_result.get("total_entities", 0)
+    univ_risky = int(by_prov["risky_count"].sum()) if not by_prov.empty and "risky_count" in by_prov.columns else 0
+
+    top_line = (
+        f"Highest-risk: {top.canonical_name} (score {top.ghost_score:.3f}, {top.overall_risk})"
+        if top else "No entities analyzed."
+    )
+    return (
+        f"You are a federal funding analyst reviewing {total} flagged non-profit organizations "
+        f"for ghost capacity — operations that consume public funding without delivering services. "
+        f"Findings: {critical} CRITICAL, {high} HIGH, average ghost score {avg_score:.3f}. "
+        f"{top_line}. "
+        f"Universe context: {univ_total:,} funded organizations total, {univ_risky:,} flagged in universe. "
+        f"Write exactly one sentence (under 40 words) summarizing the key risk signal for a non-technical audience."
+    )
+
+
+def _llm_analysis_summary(batch_results: list, portfolio_result: dict) -> str:
+    """
+    Returns a one-sentence plain-English summary of the analysis findings.
+
+    STUB — generates a deterministic message from the data.
+    Replace the body below with:
+
+        import anthropic
+        client = anthropic.Anthropic()
+        prompt = _build_summary_prompt(batch_results, portfolio_result)
+        msg = client.messages.create(
+            model="claude-opus-4-7",
+            max_tokens=80,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return msg.content[0].text.strip()
+    """
+    total     = len(batch_results)
+    critical  = sum(1 for r in batch_results if r.overall_risk == "CRITICAL")
+    high      = sum(1 for r in batch_results if r.overall_risk == "HIGH")
+    avg_score = sum(r.ghost_score for r in batch_results) / max(total, 1)
+    top       = max(batch_results, key=lambda r: r.ghost_score) if batch_results else None
+
+    if critical >= 1:
+        lead = f"{critical} of your {total} flagged organization{'s' if total > 1 else ''} show CRITICAL ghost capacity signals"
+    elif high >= 1:
+        lead = f"{high} of your {total} flagged organization{'s' if total > 1 else ''} show HIGH-risk ghost capacity signals"
+    else:
+        lead = f"All {total} flagged organization{'s' if total > 1 else ''} score below the high-risk threshold"
+
+    if top:
+        tail = f", with {top.canonical_name} carrying the strongest risk at a ghost score of {top.ghost_score:.2f}."
+    else:
+        tail = "."
+
+    return lead + tail
+
+
+# ─── Chart helper ─────────────────────────────────────────────────────────────
 
 def _labeled_bar_chart(df: pd.DataFrame, x_col: str, y_col: str,
                         x_title: str = "", y_title: str = "",
                         colour: str = "#4C78A8") -> alt.Chart:
-    """Altair bar chart with data labels on top of each bar."""
     base = alt.Chart(df).encode(
         x=alt.X(f"{x_col}:N", title=x_title, sort=None),
         y=alt.Y(f"{y_col}:Q", title=y_title),
     )
-    bars = base.mark_bar(color=colour)
+    bars   = base.mark_bar(color=colour)
     labels = base.mark_text(dy=-6, fontSize=11).encode(
         text=alt.Text(f"{y_col}:Q", format=".2f")
     )
     return (bars + labels).properties(height=280)
 
 
-# ─── Public entry point ────────────────────────────────────────────────────────
+# ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def _to_plain(value):
     if is_dataclass(value):
@@ -99,293 +172,195 @@ def _set_default_report_entity(results: list) -> None:
     })
 
 
-def _render_export_prompt(kind: str) -> None:
-    st.divider()
-    st.subheader("Export findings")
-    st.write("The analysis is complete. Continue to Report to render risk cards, narrative briefs, and downloadable outputs.")
+def _fmt_pct(df: pd.DataFrame, cols: list) -> pd.DataFrame:
+    for c in cols:
+        if c in df.columns:
+            df[c] = df[c].map(lambda x: f"{float(x)*100:.1f}%" if x is not None else "N/A")
+    return df
 
-    export_col, clear_col = st.columns([1, 1])
-    with export_col:
-        if st.button("Continue to Report", type="primary", use_container_width=True, key=f"{kind}_continue_report"):
-            if kind == "batch":
-                _set_default_report_entity(st.session_state.get("batch_analysis_results") or [])
-            go_to_page("Report")
-    with clear_col:
-        if st.button("Clear analysis results", use_container_width=True, key=f"{kind}_clear_results"):
-            if kind == "batch":
-                st.session_state.pop("batch_analysis_results", None)
-            else:
-                st.session_state.pop("portfolio_results", None)
-            st.rerun()
 
+def _fmt_dollar(df: pd.DataFrame, cols: list) -> pd.DataFrame:
+    for c in cols:
+        if c in df.columns:
+            df[c] = df[c].map(lambda x: f"${float(x):,.0f}" if x is not None else "N/A")
+    return df
+
+
+# ─── Public entry point ────────────────────────────────────────────────────────
 
 def render_analyze() -> None:
-    st.title("Public Funding Risk Intelligence Agent")
-    st.subheader("Analysis — Deterministic, no LLM")
-    st.caption("Choose the analysis to run on the curated workflow, then export the completed findings to Report.")
+    st.title("ZombieTrace")
+    st.subheader("Analysis")
 
     flagged: list = st.session_state.get("flagged_list", [])
     if not flagged:
         st.info("Your flagged list is empty. Go to Fetch and add organizations before analysis.")
         return
 
-    st.markdown("**Current flagged queue**")
-    st.caption(f"{len(flagged)} organization(s) are ready from the Flagged step.")
-
-    st.subheader("Purpose of analysis")
-    st.write(
-        "This step elevates the flagged entities from a review list into structured findings. "
-        "The goal is to test whether the selected organizations show stronger evidence of ghost-capacity risk, "
-        "then prepare the results for reporting."
-    )
-    st.write(
-        "Analysis is conducted with deterministic scoring logic, not free-form LLM judgment. "
-        "The app combines funding records, CRA filing patterns, program spending, employee signals, "
-        "government dependency, transfers, and rule-based flags into comparable risk outputs."
-    )
-
-    st.subheader("Analysis methods")
-    method_cols = st.columns(2)
-    method_cols[0].markdown("**Batch Entity Risk Analysis**")
-    method_cols[0].write(
-        "Scores each selected flagged entity, ranks the results, and highlights the strongest evidence "
-        "for entity-level review."
-    )
-    method_cols[1].markdown("**Portfolio Pattern Analysis**")
-    method_cols[1].write(
-        "Looks across the broader funded universe to summarize aggregate risk patterns by geography, "
-        "entity type, funding band, and department."
-    )
-
-    options = {
-        "Batch Entity Risk Analysis": (
-            "Runs the deterministic ghost-capacity pipeline for every organization in the Flagged List."
-        ),
-        "Portfolio Pattern Analysis": (
-            "Scans the broader funded universe to summarize aggregate risk patterns by province, entity type, funding band, and department."
-        ),
-    }
-    selected_analysis = st.radio(
-        "Analysis type",
-        list(options.keys()),
-        horizontal=True,
-        key="selected_analysis_type",
-    )
-    st.info(options[selected_analysis])
-
-    if selected_analysis == "Batch Entity Risk Analysis":
-        _render_batch_analysis()
-    else:
-        _render_portfolio_dashboard()
-
-
-# ─── Tab 1: Batch Analysis ─────────────────────────────────────────────────────
-
-def _render_batch_analysis() -> None:
-    flagged: list = st.session_state.get("flagged_list", [])
-
-    st.write(f"**{len(flagged)} organization(s)** will be analyzed from your Flagged List.")
-
-    flag_rows = []
-    for ent in flagged:
-        flag_rows.append({
-            "Organization":    ent.get("canonical_name", ""),
-            "BN":              ent.get("bn_root", ""),
-            "Province":        ent.get("province", ""),
-            "Fed Total ($)":   f"${float(ent.get('fed_total', 0)):,.0f}",
-            "Rules Triggered": int(ent.get("rules_triggered", 0)),
-        })
-    st.dataframe(pd.DataFrame(flag_rows), use_container_width=True, hide_index=True)
-
-    if st.button("Run Batch Analysis", type="primary", key="run_batch"):
-        with st.spinner(f"Analyzing {len(flagged)} organization(s)…"):
-            results = run_entity_batch_analysis(flagged)
-        st.session_state["batch_analysis_results"] = results
-        st.rerun()
-
-    results = st.session_state.get("batch_analysis_results")
-    if not results:
-        return
-
-    st.divider()
-    st.subheader("Batch Results")
-
-    # Summary metrics
-    critical_count = sum(1 for r in results if r.overall_risk == "CRITICAL")
-    high_count     = sum(1 for r in results if r.overall_risk == "HIGH")
-    avg_ghost      = sum(r.ghost_score for r in results) / max(len(results), 1)
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Analyzed",        len(results))
-    m2.metric("CRITICAL",        critical_count)
-    m3.metric("HIGH",            high_count)
-    m4.metric("Avg Ghost Score", f"{avg_ghost:.3f}")
-
-    st.markdown("**Ranked Findings Preview**")
-    st.dataframe(_batch_results_df(results), use_container_width=True, hide_index=True)
-
-    top_result = max(results, key=lambda x: x.ghost_score)
-    st.markdown("**Highest-risk finding**")
-    h1, h2, h3 = st.columns(3)
-    h1.metric("Organization", top_result.canonical_name)
-    h2.metric("Risk", top_result.overall_risk)
-    h3.metric("Ghost Score", f"{top_result.ghost_score:.3f}")
-    st.caption(top_result.explanation)
-
-    batch_json = json.dumps(_to_plain(results), indent=2, default=str)
-    batch_csv = _batch_results_df(results).to_csv(index=False)
-    dl1, dl2, _ = st.columns([1, 1, 2])
-    dl1.download_button(
-        "Download Preview JSON",
-        data=batch_json,
-        file_name="batch-analysis-preview.json",
-        mime="application/json",
-        use_container_width=True,
-    )
-    dl2.download_button(
-        "Download Preview CSV",
-        data=batch_csv,
-        file_name="batch-analysis-preview.csv",
-        mime="text/csv",
-        use_container_width=True,
-    )
-
-    _render_export_prompt("batch")
-
-
-# ─── Tab 2: Portfolio Dashboard ────────────────────────────────────────────────
-
-def _render_portfolio_dashboard() -> None:
-    min_fed = st.number_input(
-        "Min federal funding ($)",
-        min_value=0,
-        value=0,
-        step=10_000,
-        key="portfolio_min_fed",
-    )
-
-    if st.button("Run Portfolio Analysis", type="primary", key="run_portfolio"):
-        with st.spinner("Loading full funded universe — this may take 30–60 seconds…"):
-            portfolio_result = run_portfolio_analysis(min_fed_total=float(min_fed))
-        st.session_state["portfolio_results"] = portfolio_result
-        st.rerun()
-
+    batch_results    = st.session_state.get("batch_analysis_results")
     portfolio_result = st.session_state.get("portfolio_results")
-    if not portfolio_result:
-        return
 
+    if batch_results is None or portfolio_result is None:
+        with st.spinner(f"Scoring {len(flagged)} flagged entities and loading portfolio baseline…"):
+            if batch_results is None:
+                batch_results = run_entity_batch_analysis(flagged)
+                st.session_state["batch_analysis_results"] = batch_results
+            if portfolio_result is None:
+                portfolio_result = _cached_run_portfolio_analysis(0.0)
+                st.session_state["portfolio_results"] = portfolio_result
+
+    _render_combined_analysis(batch_results, portfolio_result)
+
+
+# ─── Combined analysis view ────────────────────────────────────────────────────
+
+def _render_combined_analysis(batch_results: list, portfolio_result: dict) -> None:
     stats      = portfolio_result.get("portfolio", {})
     dept_df    = portfolio_result.get("departments", pd.DataFrame())
     total_ents = portfolio_result.get("total_entities", 0)
 
+    # ── AI summary (stub — replace with LLM call when credentials are ready) ──
+    summary = _llm_analysis_summary(batch_results, portfolio_result)
+    st.info(f"**Analysis Summary** — {summary}")
+
+    # ── Section 1: Your flagged entities ──────────────────────────────────────
+    st.subheader("Your Flagged Entities")
+
+    critical_count = sum(1 for r in batch_results if r.overall_risk == "CRITICAL")
+    high_count     = sum(1 for r in batch_results if r.overall_risk == "HIGH")
+    avg_ghost      = sum(r.ghost_score for r in batch_results) / max(len(batch_results), 1)
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Analyzed", len(batch_results),
+              help="Total flagged entities scored in this run.")
+    m2.metric("CRITICAL", critical_count,
+              help="Ghost score ≥ 0.8 — strongest evidence of ghost capacity.")
+    m3.metric("HIGH", high_count,
+              help="Ghost score 0.6–0.8 — probable ghost pattern, warrants review.")
+    m4.metric("Avg Ghost Score", f"{avg_ghost:.3f}",
+              help="Weighted composite 0–1 across five dimensions: "
+                   "government revenue dependency (25%), program delivery deficit (30%), "
+                   "compensation burden (20%), pass-through transfers (15%), no employees (10%). "
+                   "0–0.3 low · 0.3–0.6 medium · 0.6–0.8 high · 0.8–1.0 critical.")
+
+    st.caption("Ranked by ghost score — higher means stronger ghost capacity signals.")
+    st.dataframe(_batch_results_df(batch_results), use_container_width=True, hide_index=True)
+
+    if batch_results:
+        top = max(batch_results, key=lambda x: x.ghost_score)
+        st.markdown("**Highest-risk finding**")
+        h1, h2, h3 = st.columns(3)
+        h1.metric("Organization", top.canonical_name)
+        h2.metric("Risk Label", top.overall_risk,
+                  help="CRITICAL / HIGH / MEDIUM / LOW derived from ghost score thresholds.")
+        h3.metric("Ghost Score", f"{top.ghost_score:.3f}",
+                  help="0–1 composite. See Avg Ghost Score tooltip for dimension weights.")
+        st.caption(top.explanation)
+
+    batch_json = json.dumps(_to_plain(batch_results), indent=2, default=str)
+    batch_csv  = _batch_results_df(batch_results).to_csv(index=False)
+    dl1, dl2, _ = st.columns([1, 1, 2])
+    dl1.download_button("Download JSON", data=batch_json,
+                        file_name="batch-analysis.json", mime="application/json",
+                        use_container_width=True)
+    dl2.download_button("Download CSV", data=batch_csv,
+                        file_name="batch-analysis.csv", mime="text/csv",
+                        use_container_width=True)
+
     st.divider()
-    st.subheader("Portfolio Overview")
 
-    top_ents_df = stats.get("top_entities", pd.DataFrame())
-    risk_dist   = stats.get("risk_distribution", pd.DataFrame())
+    # ── Section 2: Universe context ───────────────────────────────────────────
+    st.subheader("Universe Context")
+    st.caption(
+        f"How your flagged entities compare against {total_ents:,} funded organizations in the full universe."
+    )
 
-    total_flagged = 0
-    avg_risk_rate = 0.0
-    by_prov       = stats.get("by_province", pd.DataFrame())
-    if not by_prov.empty and "risky_count" in by_prov.columns:
-        total_flagged = int(by_prov["risky_count"].sum())
-        total_in_prov = int(by_prov["total_entities"].sum())
-        avg_risk_rate = total_flagged / max(total_in_prov, 1)
+    by_prov        = stats.get("by_province", pd.DataFrame())
+    total_risky    = int(by_prov["risky_count"].sum()) if not by_prov.empty and "risky_count" in by_prov.columns else 0
+    total_universe = int(by_prov["total_entities"].sum()) if not by_prov.empty else 0
+    avg_risk_rate  = total_risky / max(total_universe, 1)
 
     pm1, pm2, pm3 = st.columns(3)
-    pm1.metric("Total Entities",    f"{total_ents:,}")
-    pm2.metric("Flagged (≥1 rule)", f"{total_flagged:,}")
-    pm3.metric("Avg Risk Rate",     f"{avg_risk_rate*100:.1f}%")
+    pm1.metric("Universe Entities", f"{total_ents:,}",
+               help="All active non-government FED recipients in the database.")
+    pm2.metric("Risky in Universe", f"{total_risky:,}",
+               help="Entities triggering at least one of the 10 zombie rules across the full universe.")
+    pm3.metric("Universe Risk Rate", f"{avg_risk_rate*100:.1f}%",
+               help="Share of the funded universe triggering at least one rule. "
+                    "Compare to the risk rate in your flagged set to judge concentration.")
 
-    # Risk distribution chart
-    if not risk_dist.empty and "risk_label" in risk_dist.columns:
-        st.markdown("**Risk Distribution**")
-        chart_df = risk_dist.rename(columns={"risk_label": "Risk Level", "count": "Count"})
-        chart = _labeled_bar_chart(chart_df, "Risk Level", "Count",
+    risk_dist = stats.get("risk_distribution", pd.DataFrame())
+    col_chart, col_prov = st.columns(2)
+
+    with col_chart:
+        st.markdown("**Risk Distribution — Full Universe**")
+        if not risk_dist.empty and "risk_label" in risk_dist.columns:
+            chart_df = risk_dist.rename(columns={"risk_label": "Risk Level", "count": "Count"})
+            st.altair_chart(
+                _labeled_bar_chart(chart_df, "Risk Level", "Count",
                                    x_title="Risk Level", y_title="Entity Count",
-                                   colour="#E45756")
-        st.altair_chart(chart, use_container_width=True)
-
-    st.divider()
-
-    # Province and entity type
-    col_prov, col_type = st.columns(2)
+                                   colour="#E45756"),
+                use_container_width=True,
+            )
 
     with col_prov:
         st.markdown("**By Province**")
-        by_province = stats.get("by_province", pd.DataFrame())
-        if not by_province.empty:
-            disp = by_province.copy()
-            disp["risk_rate"]         = disp["risk_rate"].map(lambda x: f"{x*100:.1f}%")
-            disp["avg_gov_dependency"]= disp["avg_gov_dependency"].map(lambda x: f"{x*100:.1f}%")
-            disp["avg_program_ratio"] = disp["avg_program_ratio"].map(lambda x: f"{x*100:.1f}%")
-            disp["total_funding"]     = disp["total_funding"].map(lambda x: f"${x:,.0f}")
+        if not by_prov.empty:
+            disp = _fmt_dollar(_fmt_pct(by_prov.copy(),
+                               ["risk_rate", "avg_gov_dependency", "avg_program_ratio"]),
+                               ["total_funding"])
             st.dataframe(disp, use_container_width=True, hide_index=True)
+
+    col_type, col_band = st.columns(2)
 
     with col_type:
         st.markdown("**By Entity Type**")
         by_entity_type = stats.get("by_entity_type", pd.DataFrame())
         if not by_entity_type.empty:
-            disp = by_entity_type.copy()
-            disp["risk_rate"]         = disp["risk_rate"].map(lambda x: f"{x*100:.1f}%")
-            disp["avg_gov_dependency"]= disp["avg_gov_dependency"].map(lambda x: f"{x*100:.1f}%")
-            disp["avg_program_ratio"] = disp["avg_program_ratio"].map(lambda x: f"{x*100:.1f}%")
-            disp["total_funding"]     = disp["total_funding"].map(lambda x: f"${x:,.0f}")
+            disp = _fmt_dollar(_fmt_pct(by_entity_type.copy(),
+                               ["risk_rate", "avg_gov_dependency", "avg_program_ratio"]),
+                               ["total_funding"])
             st.dataframe(disp, use_container_width=True, hide_index=True)
 
-    # By funding band
-    st.markdown("**By Funding Band**")
-    by_funding_band = stats.get("by_funding_band", pd.DataFrame())
-    if not by_funding_band.empty:
-        disp = by_funding_band.copy()
-        disp["risk_rate"]         = disp["risk_rate"].map(lambda x: f"{x*100:.1f}%")
-        disp["avg_gov_dependency"]= disp["avg_gov_dependency"].map(lambda x: f"{x*100:.1f}%")
-        disp["avg_program_ratio"] = disp["avg_program_ratio"].map(lambda x: f"{x*100:.1f}%")
-        disp["total_funding"]     = disp["total_funding"].map(lambda x: f"${x:,.0f}")
-        st.dataframe(disp, use_container_width=True, hide_index=True)
+    with col_band:
+        st.markdown("**By Funding Band**")
+        by_funding_band = stats.get("by_funding_band", pd.DataFrame())
+        if not by_funding_band.empty:
+            disp = _fmt_dollar(_fmt_pct(by_funding_band.copy(),
+                               ["risk_rate", "avg_gov_dependency", "avg_program_ratio"]),
+                               ["total_funding"])
+            st.dataframe(disp, use_container_width=True, hide_index=True)
 
-    # Departments section
     st.divider()
     st.subheader("Risk by Department")
     if not dept_df.empty:
-        disp_dept = dept_df.copy()
-        if "risk_rate" in disp_dept.columns:
-            disp_dept["risk_rate"] = disp_dept["risk_rate"].map(lambda x: f"{float(x)*100:.1f}%")
-        if "total_funding" in disp_dept.columns:
-            disp_dept["total_funding"] = disp_dept["total_funding"].map(lambda x: f"${float(x):,.0f}")
-        if "avg_gov_dependency" in disp_dept.columns:
-            disp_dept["avg_gov_dependency"] = disp_dept["avg_gov_dependency"].map(
-                lambda x: f"{float(x)*100:.1f}%" if x is not None else "—"
-            )
-        if "avg_program_ratio" in disp_dept.columns:
-            disp_dept["avg_program_ratio"] = disp_dept["avg_program_ratio"].map(
-                lambda x: f"{float(x)*100:.1f}%" if x is not None else "—"
-            )
+        disp_dept = _fmt_dollar(_fmt_pct(dept_df.copy(),
+                               ["risk_rate", "avg_gov_dependency", "avg_program_ratio"]),
+                               ["total_funding"])
         st.dataframe(disp_dept, use_container_width=True, hide_index=True)
     else:
         st.info("No department data available.")
 
-    # Top entities
-    st.divider()
-    st.subheader("Top Flagged Entities")
+    top_ents_df = stats.get("top_entities", pd.DataFrame())
     if not top_ents_df.empty:
-        disp_top = top_ents_df.copy()
-        for col in ["avg_gov_dependency", "avg_program_ratio"]:
-            if col in disp_top.columns:
-                disp_top[col] = disp_top[col].map(lambda x: f"{float(x)*100:.1f}%")
-        for col in ["fed_total", "funding_gap"]:
-            if col in disp_top.columns:
-                disp_top[col] = disp_top[col].map(lambda x: f"${float(x):,.0f}")
+        st.divider()
+        st.subheader("Top Flagged Entities in Universe")
+        disp_top = _fmt_dollar(_fmt_pct(top_ents_df.copy(),
+                               ["avg_gov_dependency", "avg_program_ratio"]),
+                               ["fed_total", "funding_gap"])
         st.dataframe(disp_top, use_container_width=True, hide_index=True)
 
-    portfolio_json = json.dumps(_to_plain(portfolio_result), indent=2, default=str)
-    dl1, _ = st.columns([1, 3])
-    dl1.download_button(
-        "Download Preview JSON",
-        data=portfolio_json,
-        file_name="portfolio-analysis-preview.json",
-        mime="application/json",
-        use_container_width=True,
-    )
-
-    _render_export_prompt("portfolio")
+    # ── Next steps ────────────────────────────────────────────────────────────
+    st.divider()
+    st.subheader("Next Steps")
+    export_col, rerun_col, _ = st.columns([1, 1, 2])
+    with export_col:
+        if st.button("Continue to Report", type="primary", use_container_width=True,
+                     key="combined_continue_report"):
+            _set_default_report_entity(batch_results)
+            go_to_page("Report")
+    with rerun_col:
+        if st.button("Re-run Analysis", use_container_width=True, key="combined_rerun"):
+            st.session_state.pop("batch_analysis_results", None)
+            st.session_state.pop("portfolio_results", None)
+            st.rerun()

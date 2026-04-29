@@ -168,10 +168,9 @@ def render_fetch_summary(data: dict) -> None:
 # ─── Fetch page ────────────────────────────────────────────────────────────────
 
 def render_fetch() -> None:
-    st.title("Public Funding Risk Intelligence Agent")
+    st.title("ZombieTrace")
     st.subheader("Fetch Mode — Zombie Recipient Detection")
     st.caption("Four approaches to fetch and mark suspicious entities in public funding data.")
-    st.warning("TODO: Fix the Fetch page title, subtitle, and caption.")
 
     flagged_count = len(st.session_state.get("flagged_list", []))
     if flagged_count:
@@ -200,14 +199,12 @@ known organization in the entity registry — these are typically malformed or m
         )
 
     st.write(
-        "Use one of the four methods below to fetch records and mark suspicious entities for further review."
+        "Use one of the methods below to fetch records and mark suspicious entities for further review."
     )
 
-    way1, way2, way3, way4 = st.tabs([
+    way1, way2 = st.tabs([
         "User-Defined Rules",
-        "AI-Empowered Algorithms",
-        "Natural Language Database Search",
-        "Filter Lookup",
+        "Anomaly Detection (AI)",
     ])
 
     with way1:
@@ -216,11 +213,18 @@ known organization in the entity registry — these are typically malformed or m
     with way2:
         _render_way2()
 
-    with way3:
-        _render_natural_language_search()
-
-    with way4:
-        _render_way4_raw_lookup()
+    # Hackathon scope: keep these Way 1 tabs in the codebase, but hide them
+    # from the active UI for now.
+    # way3, way4 = st.tabs([
+    #     "Natural Language Database Search",
+    #     "Filter Lookup",
+    # ])
+    #
+    # with way3:
+    #     _render_natural_language_search()
+    #
+    # with way4:
+    #     _render_way4_raw_lookup()
 
 
 def _render_way1() -> None:
@@ -697,7 +701,7 @@ def _render_way4_raw_lookup() -> None:
 # ─── Flagged entities page ─────────────────────────────────────────────────────
 
 def render_flagged() -> None:
-    st.title("Public Funding Risk Intelligence Agent")
+    st.title("ZombieTrace")
     st.subheader("Flagged Entities — Review List")
     st.caption("The first 10 candidates are preselected for analysis. Adjust the checklist, then continue.")
 
@@ -782,7 +786,7 @@ def _format_way2_display(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _render_way2() -> None:
-    st.subheader("AI-Empowered Algorithms")
+    st.subheader("Anomaly Detection (AI)")
     st.caption(
         "Ranks organizations that look statistically unusual compared with "
         "similar publicly funded peers. Uses user-defined rule signals as model features. No LLM."

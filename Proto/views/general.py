@@ -116,13 +116,13 @@ def render_workflow_notice() -> None:
 
 def workflow_status_label(page: str) -> str:
     if page == "Fetch":
-        return "1. Fetch and Mark Entities"
+        return "1. Search Organizations"
     if page == "Flagged":
-        return "2. Show Flagged Entities"
+        return "2. Review Shortlist"
     if page == "Analyze":
-        return "3. Analyze Entities"
+        return "3. Run Analysis"
     if page == "Report":
-        return "4. Report Entities"
+        return "4. View Report"
     return page
 
 
@@ -339,34 +339,31 @@ Use these terms in your request to get cleaner results.
 # ─── Home page ─────────────────────────────────────────────────────────────────
 
 def render_home() -> None:
-    st.title("Public Funding Risk Intelligence Agent")
-    st.warning("TODO: Come up with a final name for this tool.")
-    st.caption("Investigate Canadian organizations receiving public funds for ghost capacity patterns.")
+    st.title("ZombieTrace")
+    st.caption("Find Canadian organizations collecting public money with nothing to show for it.")
     st.divider()
 
     st.subheader("What this app does")
     st.write(
-        "This prototype helps government employees, journalists, researchers, and members of the public "
-        "inspect Canadian organizations that receive public funding. "
-        "It combines federal grants data with CRA charity filings to surface patterns where funding "
-        "continues but program delivery capacity appears weak, missing, or hard to verify. "
-        "The goal is to make open data easier to access, connect, and use for public accountability."
+        "Every year, billions in federal grants flow to Canadian non-profits and charities. "
+        "Most organizations use that funding responsibly — but some show patterns that raise questions: "
+        "no employees, near-zero program spending, revenue almost entirely from government, "
+        "and federal disbursements that far exceed what CRA filings show was spent on delivery. "
+        "ZombieTrace connects federal grants records with CRA charity filings to surface those patterns "
+        "and turn them into evidence-ready findings."
     )
 
-    st.subheader("Workflow")
+    st.subheader("How it works")
     if WORKFLOW_IMAGE_PATH.exists():
         st.image(str(WORKFLOW_IMAGE_PATH), use_container_width=True)
-        st.caption("image (first draft), need more explanation")
-    else:
-        st.warning("TODO: Add workflow illustration here.")
     st.write(
-        "The app is intentionally linear: start in Fetch, add candidate organizations to the Flagged List, "
-        "review that list, run deterministic analysis, then export the completed findings in Report. "
-        "Later steps stay locked until the required earlier work is complete, which keeps the output consistent."
+        "The workflow is intentionally linear. Search for candidate organizations, build a shortlist, "
+        "run the analysis, then export a report. Each step stays locked until the previous one is complete "
+        "— so findings are always grounded in a consistent review process."
     )
 
     st.button(
-        "Start by Fetching and Marking Entities",
+        "Start Investigation",
         type="primary",
         use_container_width=True,
         on_click=go_to_page,
@@ -375,60 +372,69 @@ def render_home() -> None:
 
     st.divider()
 
-    st.subheader("4 Potential Impacts")
-    st.warning("TODO: Revise this section further. These impact points need stronger wording and supporting evidence.")
+    st.subheader("Why ZombieTrace is different")
     impact_cols = st.columns(4)
-    impact_cols[0].markdown("**Artificial Intelligence (AI) and Data Science (DS)**")
-    impact_cols[0].markdown("Uses **AI and DS methods** to move beyond **keyword search** and surface **patterns across public records**.")
-    impact_cols[1].markdown("**Explainability**")
-    impact_cols[1].markdown("Shows **why an entity was flagged** and what **evidence supports the finding** to strengthen **accountability**.")
-    impact_cols[2].markdown("**Semi-Automated With a Purpose**")
-    impact_cols[2].markdown("Uses **AI automation** to increase **efficiency** while humans serve as **guardrails** to maintain **output quality**.")
-    impact_cols[3].markdown("**Data-Driven Decision Making**")
-    impact_cols[3].markdown("Turns **connected records** into **evidence-based reporting** that can support **review and action**.")
+    impact_cols[0].markdown("**Connects Siloed Data**")
+    impact_cols[0].markdown("Links **federal grants** and **CRA charity filings** that are never published together — surfacing patterns invisible in either dataset alone.")
+    impact_cols[1].markdown("**Shows Its Work**")
+    impact_cols[1].markdown("Every risk score comes with **the signals that drove it** — so reviewers can assess the evidence, not just accept a number.")
+    impact_cols[2].markdown("**Human Judgment in the Loop**")
+    impact_cols[2].markdown("AI surfaces candidates and scores risk. **Humans decide** which organizations to investigate and what action to take.")
+    impact_cols[3].markdown("**Report-Ready Output**")
+    impact_cols[3].markdown("Findings export as **structured reports** that can support audit referrals, program reviews, or public accountability work.")
+
+    st.divider()
+
+    orig_cols = st.columns(4)
+    orig_cols[0].markdown("**Artificial Intelligence (AI) and Data Science (DS)**")
+    orig_cols[0].markdown("Uses **AI and DS methods** to move beyond **keyword search** and surface **patterns across public records**.")
+    orig_cols[1].markdown("**Explainability**")
+    orig_cols[1].markdown("Shows **why an entity was flagged** and what **evidence supports the finding** to strengthen **accountability**.")
+    orig_cols[2].markdown("**Semi-Automated With a Purpose**")
+    orig_cols[2].markdown("Uses **AI automation** to increase **efficiency** while humans serve as **guardrails** to maintain **output quality**.")
+    orig_cols[3].markdown("**Data-Driven Decision Making**")
+    orig_cols[3].markdown("Turns **connected records** into **evidence-based reporting** that can support **review and action**.")
 
 
 # ─── Zombie recipient context page ────────────────────────────────────────────
 
 def render_zombie_context() -> None:
-    st.title("Zombie Recipient Context")
-    st.caption("Background on the problem this prototype is designed to help investigate.")
+    st.title("About ZombieTrace")
+    st.caption("The problem we're solving and how the tool approaches it.")
     st.divider()
 
-    st.subheader("What are zombie recipients?")
+    st.subheader("What is ghost capacity?")
     st.write(
-        "In this prototype, zombie recipients are organizations that appear to keep receiving, holding, "
-        "or being associated with public funding while showing signs that their delivery capacity is weak, "
-        "inactive, missing, or difficult to verify. They may have old or missing filings, unusually low "
-        "program spending, high dependence on government revenue, few visible staff, large funding gaps, "
-        "or other signals that suggest the public record deserves closer review."
+        "Ghost capacity describes an organization that keeps receiving government funding "
+        "but shows no credible evidence it can deliver what it was funded to do. "
+        "The signals: revenue almost entirely from government, near-zero program spending, "
+        "no reported employees, and federal disbursements that far exceed what CRA filings show was spent on programs. "
+        "These patterns persist across multiple years — these are not startups or organizations winding down. "
+        "They remain registered, keep receiving money, and leave little public trace of delivery."
     )
     st.write(
-        "The term is not meant to be a final accusation. It is a triage concept: the app helps identify "
-        "organizations where the available data raises questions, then leaves room for human review, "
-        "context, and follow-up evidence before any conclusion is made."
-    )
-
-    st.subheader("Why this matters")
-    st.write(
-        "Public funding records and charity filings are often spread across different datasets, formats, "
-        "and reporting periods. A single organization can appear many times across grants, departments, "
-        "years, and CRA filings. Without a structured workflow, it is easy to miss patterns that only become "
-        "visible when those records are connected."
+        "The label is a triage signal, not a verdict. ZombieTrace surfaces organizations where the public "
+        "record raises questions worth investigating — it leaves the conclusion to human reviewers with access "
+        "to context the data alone cannot provide."
     )
 
-    st.subheader("Our proposed approach")
+    st.subheader("Why this is hard to spot manually")
     st.write(
-        "The app guides users through a linear review workflow: fetch candidate entities, mark suspicious "
-        "organizations, analyze the selected entities, and export report-ready findings. This keeps the "
-        "review process consistent and reduces the chance that users skip important steps."
+        "Federal grants data and CRA charity filings are published separately, in different formats, "
+        "across different time periods. A single organization can appear dozens of times — across departments, "
+        "grant programs, fiscal years, and T3010 filings — with no easy way to connect the records. "
+        "Ghost capacity patterns only become visible when those datasets are linked and compared at scale."
     )
+
+    st.subheader("How ZombieTrace works")
     st.write(
-        "The Fetch page offers multiple ways to surface candidates: user-defined rules based on domain "
-        "knowledge, AI-empowered anomaly detection, natural-language database search, and a filter lookup "
-        "backup. The Flagged page lets users keep human judgment in the loop by adding or removing entities "
-        "before analysis. The Analyze page then summarizes risk patterns, and the Report page turns the "
-        "results into evidence-based outputs that can support accountability, review, and follow-up action."
+        "The tool guides reviewers through a structured four-step workflow: search for candidate organizations, "
+        "build a shortlist based on judgment and signals, run deterministic risk scoring, and export findings "
+        "as a structured report. "
+        "Risk scores are built from five dimensions — government revenue dependency, program delivery deficit, "
+        "compensation burden, pass-through transfers, and employee count — combined into a single ghost score "
+        "with full signal-level transparency. "
+        "No finding is presented without the evidence behind it."
     )
 
 
@@ -436,7 +442,7 @@ def render_zombie_context() -> None:
 
 def render_open_search(show_header: bool = True) -> None:
     if show_header:
-        st.title("Public Funding Risk Intelligence Agent")
+        st.title("ZombieTrace")
         st.subheader("Open Search — Natural language CRA/FED search")
         st.caption("Ask for ranked tables such as top transfers out, zero-employee funded orgs, or likely ghost-capacity candidates.")
 

@@ -1,6 +1,7 @@
 import streamlit as st
 
 from views import general, fetch, analyze, report
+from tools.preload import start_fetch_preload
 
 PAGE_OPTIONS = [
     "Home",
@@ -10,15 +11,24 @@ PAGE_OPTIONS = [
     "Report",
 ]
 
-st.set_page_config(page_title="Public Funding Risk Intelligence", layout="wide")
+st.set_page_config(page_title="ZombieTrace", layout="wide")
 
 general.init_session_state()
 general.enforce_workflow_page()
+start_fetch_preload()
+
+# Warm the portfolio cache once per session so "Run Portfolio Analysis" is instant
+if "portfolio_cache_warmed" not in st.session_state:
+    st.session_state["portfolio_cache_warmed"] = True
+    try:
+        from views.analyze import _cached_run_portfolio_analysis
+        _cached_run_portfolio_analysis(0.0)
+    except Exception:
+        pass
 
 with st.sidebar:
-    st.title("Risk Intelligence")
-    st.caption("CRA + federal funding review")
-    st.warning("TODO: Fix the tool name and subtitle, and add an AI-generated image.")
+    st.title("ZombieTrace")
+    st.caption("Track public funding. Surface ghost recipients.")
     st.divider()
     st.markdown(
         "<div style='text-align:center; font-size:1.5rem; font-weight:700; margin-bottom:0.5rem;'>Workflow</div>",
@@ -36,12 +46,10 @@ with st.sidebar:
             on_click=general.go_to_page,
             args=(option,),
         )
-        if disabled and general.page_prerequisite(option):
-            st.caption(general.page_prerequisite(option))
     st.caption("Greyed-out buttons mean you are not there yet. Complete the current page first.")
     st.divider()
     st.button(
-        "Zombie Recipient Context",
+        "About This Tool",
         type="primary" if st.session_state["page"] == "Zombie Context" else "secondary",
         use_container_width=True,
         on_click=general.go_to_page,

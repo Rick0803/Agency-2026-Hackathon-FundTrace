@@ -1,0 +1,155 @@
+Here's the honest tradeoff map:
+
+Option A: BigQuery (cloud computation)
+What it would take:
+
+Export all 4 large tables from PostgreSQL → CSV/Parquet
+Upload to Google Cloud Storage
+Load into BigQuery
+Rewrite the query() layer in retrieval.py to use google-cloud-bigquery instead of psycopg2
+Handle auth, billing, schema differences
+Reality check for a hackathon: The data dump alone takes time, and the organizers' shared DB may block bulk COPY exports. BigQuery would be fast (sub-second for these CTEs), but the setup cost is hours, not minutes.
+
+Option B: DuckDB in-memory
+What it would take:
+
+On startup, dump the 4 PostgreSQL tables into pandas DataFrames (~1–2 GB in RAM)
+Register them with an in-memory DuckDB engine
+Run the same SQL against DuckDB (milliseconds instead of seconds)
+Problem: The slow part is fetching from PostgreSQL. Loading all of fed.grants_contributions (1.275M rows) into memory is itself a 30–60s operation, and you still need to do it at least once — same as the preload approach but with more memory pressure.
+
+Option C: Background preload (module-level Python dict + thread)
+What it would take:
+
+~30 lines of code in a new preload.py, ~10 lines in app.py, ~15 lines in fetch.py
+No new infrastructure
+No auth changes
+How it works: A daemon thread fires the two slow queries the instant the app process starts. By demo time (~60s after launch), results are already in memory. Button click is instant.
+
+Recommendation
+Option C is the right call for demo day. The bottleneck is the PostgreSQL query itself — BigQuery and DuckDB don't eliminate that first fetch, they just reformat where it happens. Preloading solves the only thing that actually matters: the delay the audience sees.
+
+If you want BigQuery for the long-term product beyond the hackathon, that's worth building — but not in the next few hours.
+
+Want me to go ahead and implement the background preload?
+
+Some background information to better help navigate for bigquery.
+Please go ahead and share it — I'm ready to read whatever context you have (GCP project setup, credentials, existing BigQuery datasets, connection strings, etc.).
+
+None selected 
+
+Skip to content
+Using Gmail with screen readers
+16 of 28,728
+Your Google Cloud Environment for Agency 2026 is Ready!
+Inbox
+
+Mike Craigen <craigenator@google.com> Unsubscribe
+14:18 (8 hours ago)
+to me
+
+The wait is over! Your dedicated Google Cloud project for the Agency 2026 - Ottawa Hackathon is provisioned and ready to go. We're incredibly excited to see what you'll build to enhance transparency and accountability in government spending.
+
+
+Accessing Your Environment:
+
+
+Log In: Head to the Google Cloud Console: https://console.cloud.google.com/
+
+Select Your Project:
+
+Make sure you are logged in with the Google Account you provided in the registration form.
+
+In the project selector at the top, you should see a project named Agency2026 - [Your Team Name]. Select this project.
+
+image.png
+
+You'll be working within the CNU-Ottawa-Hackathon-Cloud-Sandbox-925634288385 organization.
+
+If you don't see your project, try using the search bar.
+image.png
+
+Find the Data: The hackathon datasets (CRA, Federal, Alberta) are pre-loaded for you in a separate project called Agency2026Ottawa Data. You can access this data from your team project.
+
+
+Key Google Cloud Tools
+
+
+Gemini Cloud Assist: Don’t know how to do something? Ask Gemini.  Hit the Gemini icon in the top right corner to get contextual supportimage.png
+
+BigQuery (Your Data Analysis Powerhouse):
+
+We have pre-loaded the datasets from the Agency Github into BigQuery for you
+
+Gemini Enterprise Agent Platform (for Generative AI Access and Agent Building):
+
+Gemini CLI:
+
+What it is: Interact with Gemini models, your local file system, and shell commands directly from your terminal.
+
+How to Use:
+
+Install locally: Installation Instructions
+
+OR use the pre-installed version in Cloud Shell (search "Cloud Shell" in the console). Ensure your Agency2026 - [Your Team Name] project is selected in Cloud Shell.
+
+Authentication: Strongly suggest that you use Vertex AI (now called Agent Platform) to get the most out of the tool. 
+
+Lots of other tools are available to you, if you have permission or access issues with any tools please reach out via the support channels
+
+
+Support:
+
+
+Discord: The primary channel for support is the #google-support channel on Agency 2026 Discord server..
+
+On-Site: Google Cloud engineers will be available in person at the event to assist with architecture, troubleshooting, and tool usage.
+
+
+We are incredibly excited to provide these tools and support your efforts. Don't hesitate to reach out with questions.
+
+
+Happy Hacking!
+
+
+Best regards,
+
+
+The Google Cloud Team
+
+
+
+
+
+
+Free Google Cloud Training
+--
+Unsubscribe
+The data is already loaded in BigQuery — this changes everything. No migration needed. Let me outline exactly what's needed before I write any code.
+
+What you need to gather from the GCP Console (5 minutes)
+Step 1 — BigQuery project ID
+
+In the BigQuery console, switch to the Agency2026Ottawa Data project and copy the exact project ID from the top bar (something like agency2026ottawa-data or similar with hyphens/numbers).
+
+Step 2 — Dataset and table names
+
+Expand the project in the left sidebar and confirm the dataset/table names. Based on the PostgreSQL schema they should look like:
+
+PostgreSQL	Expected BigQuery
+fed.grants_contributions	fed.grants_contributions
+cra.cra_financial_details	cra.cra_financial_details
+cra.cra_compensation	cra.cra_compensation
+general.entity_golden_records	general.entity_golden_records
+Step 3 — Auth method
+
+Two options for your local Streamlit app:
+
+Application Default Credentials (easiest): Run gcloud auth application-default login in your terminal, select your hackathon Google account. No key file needed.
+Service account JSON: Download a key from IAM → Service Accounts if you have one.
+What I'll implement once you have those names
+A bigquery_retrieval.py alongside retrieval.py — same function signatures, BigQuery backend
+The two slow functions (fetch_zombie_heuristics, fetch_way2_feature_table) replaced with BigQuery equivalents
+A BQ_PROJECT_ID env var in .env to toggle between Postgres and BigQuery
+Minor SQL dialect fixes (BigQuery uses SUBSTR not LEFT, CAST(x AS DATE) not x::date, etc.)
+BigQuery will run those 4–5 CTE queries in under 5 seconds instead of 30–60s, and it's free within the provided sandbox quota.

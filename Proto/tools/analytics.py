@@ -860,6 +860,124 @@ def analyze_entity_from_data(
     )
 
 
+# ─── Portfolio-level stats — fast path (no ML, flags already in SQL) ──────────
+
+def compute_portfolio_stats_from_flags(df: pd.DataFrame) -> dict:
+    """
+    Fast portfolio aggregation using pre-computed flag columns from
+    fetch_portfolio_summary_table. No ML scoring — just pandas groupby on flags.
+    """
+    if df.empty:
+        return {
+            "by_province":       pd.DataFrame(),
+            "by_entity_type":    pd.DataFrame(),
+            "by_funding_band":   pd.DataFrame(),
+            "risk_distribution": pd.DataFrame(),
+            "top_entities":      pd.DataFrame(),
+            "alerts":            pd.DataFrame(),
+        }
+
+    df = df.copy()
+
+    for col in ["fed_total", "funding_gap", "avg_gov_dependency", "avg_program_ratio"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    flag_cols = [c for c in WAY2_FLAG_COLS if c in df.columns]
+    for col in flag_cols:
+        df[col] = df[col].astype(bool)
+    df["rules_triggered"] = df[flag_cols].sum(axis=1)
+
+    df["funding_band"] = pd.cut(
+        df["fed_total"].clip(lower=0),
+        bins=[0, 10_000, 100_000, 1_000_000, 10_000_000, float("inf")],
+        labels=["<$10K", "$10K-$100K", "$100K-$1M", "$1M-$10M", "$10M+"],
+        right=True,
+    ).astype(str)
+
+    def _risk_label(rt: float) -> str:
+        if rt >= 5:   return "CRITICAL"
+        elif rt >= 3: return "HIGH"
+        elif rt >= 1: return "MEDIUM"
+        return "LOW"
+
+    df["risk_label"] = df["rules_triggered"].apply(_risk_label)
+
+    today = pd.Timestamp.today()
+    last_filing = pd.to_datetime(df["last_cra_filing"], errors="coerce")
+    df["years_since_last_cra_filing"] = np.where(
+        last_filing.notna(),
+        (today - last_filing).dt.days / 365.25,
+        5.0,
+    )
+
+    def _group_stats(grouped) -> pd.DataFrame:
+        out = grouped.agg(
+            total_entities     = ("rules_triggered", "count"),
+            risky_count        = ("rules_triggered", lambda x: (x >= 1).sum()),
+            avg_gov_dependency = ("avg_gov_dependency", "mean"),
+            avg_program_ratio  = ("avg_program_ratio", "mean"),
+            total_funding      = ("fed_total", "sum"),
+        ).reset_index()
+        out["risk_rate"] = out["risky_count"] / out["total_entities"].replace(0, np.nan)
+        out["risk_rate"] = out["risk_rate"].fillna(0)
+        return out.sort_values("risk_rate", ascending=False).reset_index(drop=True)
+
+    by_province     = _group_stats(df.groupby("province",     observed=True))
+    by_entity_type  = _group_stats(df.groupby("entity_type",  observed=True))
+    by_funding_band = _group_stats(df.groupby("funding_band", observed=True))
+
+    risk_dist = (
+        df.groupby("risk_label", observed=True)
+        .size()
+        .reset_index(name="count")
+        .sort_values("count", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    top_cols = [
+        "canonical_name", "bn_root", "province", "entity_type",
+        "fed_total", "avg_gov_dependency", "avg_program_ratio",
+        "funding_gap", "rules_triggered", "last_cra_filing",
+        "years_since_last_cra_filing", "status",
+    ]
+    top_entities = (
+        df[[c for c in top_cols if c in df.columns]]
+        .sort_values(["rules_triggered", "funding_gap"], ascending=[False, False])
+        .head(25)
+        .reset_index(drop=True)
+    )
+
+    alerts_df = df[df["avg_gov_dependency"] > 0.80].copy()
+    if not alerts_df.empty:
+        alerts_df["days_since_last_cra_filing"] = (
+            alerts_df["years_since_last_cra_filing"].fillna(0) * 365.25
+        ).round().astype(int)
+        alert_cols = [
+            "canonical_name", "bn_root", "province", "entity_type", "status",
+            "fed_total", "avg_gov_dependency", "avg_program_ratio",
+            "funding_gap", "rules_triggered", "last_cra_filing",
+            "days_since_last_cra_filing",
+        ]
+        alerts = (
+            alerts_df[[c for c in alert_cols if c in alerts_df.columns]]
+            .sort_values(["avg_gov_dependency", "funding_gap"], ascending=[False, False])
+            .head(50)
+            .reset_index(drop=True)
+        )
+    else:
+        alerts = pd.DataFrame()
+
+    return {
+        "by_province":       by_province,
+        "by_entity_type":    by_entity_type,
+        "by_funding_band":   by_funding_band,
+        "risk_distribution": risk_dist,
+        "top_entities":      top_entities,
+        "alerts":            alerts,
+    }
+
+
 # ─── Portfolio-level stats (no LLM) ───────────────────────────────────────────
 
 def compute_portfolio_stats(feature_df: pd.DataFrame) -> dict:

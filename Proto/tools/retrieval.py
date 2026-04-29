@@ -4,6 +4,7 @@
 # a pandas DataFrame. No computation happens here — that's analytics.py.
 
 import os
+from functools import lru_cache
 import pandas as pd
 import psycopg2
 from dotenv import load_dotenv
@@ -578,6 +579,261 @@ def fetch_fed_entity_count() -> int:
     return int(df.iloc[0]["count"]) if not df.empty else 0
 
 
+@lru_cache(maxsize=1)
+def _fetch_fetch_feature_table_cached() -> pd.DataFrame:
+    """
+    Shared entity-level feature table for Fetch Way 1 and Way 2.
+
+    This runs the expensive FED/CRA aggregations once per app process. Way 1
+    applies rule thresholds in pandas; Way 2 reuses the same rows for anomaly
+    feature engineering. The older SQL-specific functions remain below as a
+    fallback/reference, but the app routes through this cached path.
+    """
+    sql = """
+        WITH fed_agg AS (
+            SELECT
+                LEFT(recipient_business_number, 9)      AS bn_root,
+                SUM(COALESCE(agreement_value, 0))       AS fed_total,
+                COUNT(*)                                AS fed_agreement_count,
+                MIN(agreement_start_date::date)         AS first_grant_date,
+                MAX(agreement_start_date::date)         AS last_grant_date
+            FROM fed.grants_contributions
+            WHERE recipient_business_number IS NOT NULL
+              AND LENGTH(TRIM(recipient_business_number)) >= 9
+            GROUP BY LEFT(recipient_business_number, 9)
+        ),
+        cra_agg AS (
+            SELECT
+                LEFT(bn, 9)                             AS bn_root,
+                MIN(fpe::date)                          AS first_cra_filing,
+                MAX(fpe::date)                          AS last_cra_filing,
+                COUNT(DISTINCT fpe)                     AS cra_years,
+                AVG(
+                    CASE
+                        WHEN COALESCE(field_4540,0)+COALESCE(field_4550,0)+COALESCE(field_4560,0) > 0
+                        THEN (COALESCE(field_4540,0)+COALESCE(field_4550,0)+COALESCE(field_4560,0))
+                             / NULLIF(COALESCE(field_4700,0), 0)
+                        ELSE COALESCE(field_4570,0) / NULLIF(COALESCE(field_4700,0), 0)
+                    END
+                )                                       AS avg_gov_dependency,
+                AVG(COALESCE(field_4120, 0) / NULLIF(COALESCE(field_4950, 0), 0)) AS avg_program_ratio,
+                AVG(COALESCE(field_4100, 0) / NULLIF(COALESCE(field_4950, 0), 0)) AS avg_admin_ratio,
+                SUM(COALESCE(field_4700, 0))            AS total_revenue,
+                SUM(COALESCE(field_4500, 0)
+                  + COALESCE(field_4530, 0))            AS total_private_donations,
+                SUM(COALESCE(field_4120, 0))            AS total_program_spend,
+                SUM(COALESCE(field_4950, 0))            AS total_expenses
+            FROM cra.cra_financial_details
+            GROUP BY LEFT(bn, 9)
+        ),
+        cra_trend AS (
+            SELECT
+                bn_root,
+                MAX(CASE WHEN fpe = max_fpe THEN revenue END) AS last_year_revenue,
+                AVG(CASE WHEN fpe < max_fpe  THEN revenue END) AS avg_prior_revenue
+            FROM (
+                SELECT
+                    LEFT(bn, 9)                                         AS bn_root,
+                    fpe,
+                    COALESCE(field_4700, 0)                             AS revenue,
+                    MAX(fpe) OVER (PARTITION BY LEFT(bn, 9))            AS max_fpe
+                FROM cra.cra_financial_details
+            ) t
+            GROUP BY bn_root
+        ),
+        comp_agg AS (
+            SELECT
+                LEFT(bn, 9)                             AS bn_root,
+                SUM(COALESCE(field_300, 0))             AS total_employees,
+                SUM(COALESCE(field_390, 0))             AS total_compensation
+            FROM cra.cra_compensation
+            GROUP BY LEFT(bn, 9)
+        ),
+        transfers_agg AS (
+            SELECT
+                LEFT(bn, 9)                             AS bn_root,
+                SUM(COALESCE(total_gifts, 0))           AS transfers_out_total
+            FROM cra.cra_qualified_donees
+            GROUP BY LEFT(bn, 9)
+        )
+        SELECT
+            gr.canonical_name,
+            gr.bn_root,
+            gr.entity_type,
+            gr.status,
+            gr.dataset_sources,
+            COALESCE(gr.cra_profile->>'city',     gr.fed_profile->>'city')     AS city,
+            COALESCE(gr.cra_profile->>'province', gr.fed_profile->>'province') AS province,
+            ROUND(fed.fed_total::numeric, 2)                                   AS fed_total,
+            fed.fed_agreement_count,
+            fed.first_grant_date,
+            fed.last_grant_date,
+            cra.first_cra_filing,
+            cra.last_cra_filing,
+            COALESCE(cra.cra_years, 0)                                         AS cra_years,
+            ROUND(COALESCE(cra.avg_gov_dependency, 0)::numeric, 3)             AS avg_gov_dependency,
+            ROUND(COALESCE(cra.avg_program_ratio, 0)::numeric, 3)              AS avg_program_ratio,
+            ROUND(COALESCE(cra.avg_admin_ratio, 0)::numeric, 3)                AS avg_admin_ratio,
+            ROUND(COALESCE(cra.total_revenue, 0)::numeric, 2)                  AS total_revenue,
+            ROUND(COALESCE(cra.total_private_donations, 0)::numeric, 2)        AS total_private_donations,
+            ROUND(COALESCE(cra.total_program_spend, 0)::numeric, 2)            AS total_program_spend,
+            ROUND(COALESCE(cra.total_expenses, 0)::numeric, 2)                 AS total_expenses,
+            ROUND((fed.fed_total - COALESCE(cra.total_program_spend, 0))::numeric, 2) AS funding_gap,
+            COALESCE(comp.total_employees, 0)                                  AS total_employees,
+            COALESCE(comp.total_compensation, 0)                               AS total_compensation,
+            COALESCE(transfers.transfers_out_total, 0)                         AS transfers_out_total,
+            ct.last_year_revenue,
+            ct.avg_prior_revenue,
+            CASE WHEN ct.avg_prior_revenue > 0
+                 THEN ROUND((ct.last_year_revenue / ct.avg_prior_revenue)::numeric, 3)
+                 ELSE NULL END                                                 AS revenue_cliff_ratio
+        FROM general.entity_golden_records gr
+        JOIN      fed_agg       fed       ON fed.bn_root       = gr.bn_root
+        LEFT JOIN cra_agg       cra       ON cra.bn_root       = gr.bn_root
+        LEFT JOIN cra_trend     ct        ON ct.bn_root        = gr.bn_root
+        LEFT JOIN comp_agg      comp      ON comp.bn_root      = gr.bn_root
+        LEFT JOIN transfers_agg transfers ON transfers.bn_root = gr.bn_root
+        WHERE gr.entity_type IS DISTINCT FROM 'government'
+          AND gr.canonical_name NOT ILIKE 'government of %'
+          AND gr.canonical_name NOT ILIKE 'province of %'
+          AND gr.canonical_name NOT ILIKE 'minister of %'
+          AND gr.canonical_name NOT ILIKE 'ministry of %'
+          AND gr.canonical_name NOT ILIKE 'university of %'
+          AND gr.canonical_name NOT ILIKE '% university'
+          AND gr.canonical_name NOT ILIKE '% université'
+          AND gr.canonical_name NOT ILIKE '% school board'
+          AND gr.canonical_name NOT ILIKE '% school district%'
+          AND gr.canonical_name NOT ILIKE 'city of %'
+          AND gr.canonical_name NOT ILIKE 'town of %'
+          AND gr.canonical_name NOT ILIKE 'municipality of %'
+          AND gr.canonical_name NOT ILIKE '% health authority%'
+          AND gr.canonical_name NOT ILIKE '% regional district%'
+    """
+    return query(sql)
+
+
+def _fetch_feature_table() -> pd.DataFrame:
+    df = _fetch_fetch_feature_table_cached().copy()
+    numeric_cols = [
+        "fed_total", "fed_agreement_count", "cra_years", "avg_gov_dependency",
+        "avg_program_ratio", "avg_admin_ratio", "total_revenue",
+        "total_private_donations", "total_program_spend", "total_expenses",
+        "funding_gap", "total_employees", "total_compensation",
+        "transfers_out_total", "last_year_revenue", "avg_prior_revenue",
+        "revenue_cliff_ratio",
+    ]
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+    for col in ("first_grant_date", "last_grant_date", "first_cra_filing", "last_cra_filing"):
+        if col in df.columns:
+            df[col] = pd.to_datetime(df[col], errors="coerce")
+    return df
+
+
+def _add_way_rule_flags(
+    df: pd.DataFrame,
+    gov_dependency_threshold: float = 0.70,
+    revenue_cliff_threshold: float = 0.50,
+    ceased_cutoff_year: int = 2023,
+    filing_window_days: int = 365,
+    young_org_years: int = 2,
+) -> pd.DataFrame:
+    df = df.copy()
+    threshold   = max(0.0, min(1.0, float(gov_dependency_threshold)))
+    cliff       = max(0.0, min(1.0, float(revenue_cliff_threshold)))
+    cutoff_year = max(2018, min(2024, int(ceased_cutoff_year)))
+    cutoff_date = pd.Timestamp(f"{cutoff_year}-01-01")
+    window_days = max(30, min(1825, int(filing_window_days)))
+    young_days  = max(365, min(3650, int(young_org_years) * 365))
+
+    has_cra = df["cra_years"].fillna(0).astype(float) > 0
+    last_cra = df["last_cra_filing"]
+    first_cra = df["first_cra_filing"]
+    last_grant = df["last_grant_date"]
+    first_grant = df["first_grant_date"]
+
+    df["flag_ceased"] = last_cra.notna() & (last_cra < cutoff_date)
+    df["flag_stopped_within_12mo"] = (
+        last_cra.notna()
+        & last_grant.notna()
+        & (last_cra >= last_grant)
+        & (last_cra <= last_grant + pd.to_timedelta(window_days, unit="D"))
+    )
+    df["flag_high_gov_dependency"] = df["avg_gov_dependency"].fillna(0) >= threshold
+    df["flag_no_cra_record"] = ~has_cra
+    df["flag_zero_private_revenue"] = has_cra & (df["total_private_donations"].fillna(0) == 0)
+    df["flag_zero_program_spend"] = has_cra & (df["total_program_spend"].fillna(0) == 0)
+    df["flag_comp_exceeds_programs"] = (
+        (df["total_compensation"].fillna(0) > df["total_program_spend"].fillna(0))
+        & (df["total_compensation"].fillna(0) > 0)
+    )
+    df["flag_funding_gap"] = df["fed_total"].fillna(0) > df["total_program_spend"].fillna(0)
+    df["flag_young_org"] = (
+        first_cra.notna()
+        & first_grant.notna()
+        & (first_grant <= first_cra + pd.to_timedelta(young_days, unit="D"))
+    )
+    df["flag_revenue_cliff"] = (
+        (df["avg_prior_revenue"].fillna(0) > 0)
+        & (df["last_year_revenue"].fillna(0) < cliff * df["avg_prior_revenue"].fillna(0))
+    )
+
+    flag_cols = [
+        "flag_ceased", "flag_stopped_within_12mo", "flag_high_gov_dependency",
+        "flag_no_cra_record", "flag_zero_private_revenue", "flag_zero_program_spend",
+        "flag_comp_exceeds_programs", "flag_funding_gap", "flag_young_org", "flag_revenue_cliff",
+    ]
+    df["rules_triggered"] = df[flag_cols].sum(axis=1).astype(int)
+    df["zombie_flag"] = (df["rules_triggered"] > 0).astype(int)
+    df["days_filing_after_grant"] = (last_cra - last_grant).dt.days
+    return df
+
+
+def fetch_zombie_heuristics_fast(
+    gov_dependency_threshold: float = 0.70,
+    min_fed_total: float = 0,
+    revenue_cliff_threshold: float = 0.50,
+    ceased_cutoff_year: int = 2023,
+    filing_window_days: int = 365,
+    young_org_years: int = 2,
+) -> pd.DataFrame:
+    df = _fetch_feature_table()
+    df = _add_way_rule_flags(
+        df,
+        gov_dependency_threshold,
+        revenue_cliff_threshold,
+        ceased_cutoff_year,
+        filing_window_days,
+        young_org_years,
+    )
+    min_fed = max(0.0, float(min_fed_total))
+    df = df[(df["fed_total"] >= min_fed) & (df["zombie_flag"] == 1)]
+    return df.sort_values("fed_total", ascending=False).reset_index(drop=True)
+
+
+def fetch_way2_feature_table_fast(
+    min_fed_total: float = 0,
+    gov_dependency_threshold: float = 0.70,
+    revenue_cliff_threshold: float = 0.50,
+    ceased_cutoff_year: int = 2023,
+    filing_window_days: int = 365,
+    young_org_years: int = 2,
+) -> pd.DataFrame:
+    df = _fetch_feature_table()
+    df = _add_way_rule_flags(
+        df,
+        gov_dependency_threshold,
+        revenue_cliff_threshold,
+        ceased_cutoff_year,
+        filing_window_days,
+        young_org_years,
+    )
+    min_fed = max(0.0, float(min_fed_total))
+    df = df[(df["status"] == "active") & (df["fed_total"] >= min_fed)]
+    return df.reset_index(drop=True)
+
+
 def fetch_zombie_heuristics(
     gov_dependency_threshold: float = 0.70,
     min_fed_total: float = 0,
@@ -944,6 +1200,136 @@ def fetch_way2_feature_table(
         LEFT JOIN cra_trend     ct        ON ct.bn_root        = gr.bn_root
         LEFT JOIN comp_agg      comp      ON comp.bn_root      = gr.bn_root
         LEFT JOIN transfers_agg transfers ON transfers.bn_root  = gr.bn_root
+        WHERE gr.status = 'active'
+          AND fed.fed_total >= {min_fed}
+          AND gr.entity_type IS DISTINCT FROM 'government'
+          AND gr.canonical_name NOT ILIKE 'government of %'
+          AND gr.canonical_name NOT ILIKE 'province of %'
+          AND gr.canonical_name NOT ILIKE 'minister of %'
+          AND gr.canonical_name NOT ILIKE 'ministry of %'
+          AND gr.canonical_name NOT ILIKE 'university of %'
+          AND gr.canonical_name NOT ILIKE '% university'
+          AND gr.canonical_name NOT ILIKE '% université'
+          AND gr.canonical_name NOT ILIKE '% school board'
+          AND gr.canonical_name NOT ILIKE '% school district%'
+          AND gr.canonical_name NOT ILIKE 'city of %'
+          AND gr.canonical_name NOT ILIKE 'town of %'
+          AND gr.canonical_name NOT ILIKE 'municipality of %'
+          AND gr.canonical_name NOT ILIKE '% health authority%'
+          AND gr.canonical_name NOT ILIKE '% regional district%'
+    """
+    return query(sql)
+
+
+def fetch_portfolio_summary_table(min_fed_total: float = 0) -> pd.DataFrame:
+    """
+    Slim entity table for portfolio aggregation — groupby keys + 10 flag columns only.
+    Skips ML feature columns (avg_admin_ratio, totals, etc.) that aren't needed for
+    province/entity_type/funding_band groupby stats. Fixed thresholds (system baseline).
+    """
+    min_fed     = max(0.0, float(min_fed_total))
+    threshold   = 0.70
+    cliff       = 0.50
+    cutoff_date = "2023-01-01"
+    window_days = 365
+    young_days  = 730
+
+    sql = f"""
+        WITH fed_agg AS (
+            SELECT
+                LEFT(recipient_business_number, 9)  AS bn_root,
+                SUM(COALESCE(agreement_value, 0))   AS fed_total,
+                MIN(agreement_start_date::date)     AS first_grant_date,
+                MAX(agreement_start_date::date)     AS last_grant_date
+            FROM fed.grants_contributions
+            WHERE recipient_business_number IS NOT NULL
+              AND LENGTH(TRIM(recipient_business_number)) >= 9
+            GROUP BY LEFT(recipient_business_number, 9)
+        ),
+        cra_agg AS (
+            SELECT
+                LEFT(bn, 9)                             AS bn_root,
+                MIN(fpe::date)                          AS first_cra_filing,
+                MAX(fpe::date)                          AS last_cra_filing,
+                AVG(
+                    CASE
+                        WHEN COALESCE(field_4540,0)+COALESCE(field_4550,0)+COALESCE(field_4560,0) > 0
+                        THEN (COALESCE(field_4540,0)+COALESCE(field_4550,0)+COALESCE(field_4560,0))
+                             / NULLIF(COALESCE(field_4700,0), 0)
+                        ELSE COALESCE(field_4570,0) / NULLIF(COALESCE(field_4700,0), 0)
+                    END
+                )                                       AS avg_gov_dependency,
+                AVG(COALESCE(field_4120, 0) / NULLIF(COALESCE(field_4950, 0), 0)) AS avg_program_ratio,
+                SUM(COALESCE(field_4500, 0) + COALESCE(field_4530, 0)) AS total_private_donations,
+                SUM(COALESCE(field_4120, 0))            AS total_program_spend
+            FROM cra.cra_financial_details
+            GROUP BY LEFT(bn, 9)
+        ),
+        cra_trend AS (
+            SELECT
+                bn_root,
+                MAX(CASE WHEN fpe = max_fpe THEN revenue END) AS last_year_revenue,
+                AVG(CASE WHEN fpe < max_fpe  THEN revenue END) AS avg_prior_revenue
+            FROM (
+                SELECT
+                    LEFT(bn, 9)                                  AS bn_root,
+                    fpe,
+                    COALESCE(field_4700, 0)                      AS revenue,
+                    MAX(fpe) OVER (PARTITION BY LEFT(bn, 9))     AS max_fpe
+                FROM cra.cra_financial_details
+            ) t
+            GROUP BY bn_root
+        ),
+        comp_agg AS (
+            SELECT
+                LEFT(bn, 9)                    AS bn_root,
+                SUM(COALESCE(field_390, 0))    AS total_compensation
+            FROM cra.cra_compensation
+            GROUP BY LEFT(bn, 9)
+        )
+        SELECT
+            gr.canonical_name,
+            gr.bn_root,
+            gr.entity_type,
+            gr.status,
+            COALESCE(gr.cra_profile->>'province', gr.fed_profile->>'province') AS province,
+            ROUND(fed.fed_total::numeric, 2)                                   AS fed_total,
+            ROUND((fed.fed_total - COALESCE(cra.total_program_spend, 0))::numeric, 2) AS funding_gap,
+            ROUND(COALESCE(cra.avg_gov_dependency, 0)::numeric, 3)             AS avg_gov_dependency,
+            ROUND(COALESCE(cra.avg_program_ratio, 0)::numeric, 3)              AS avg_program_ratio,
+            cra.last_cra_filing,
+            CASE WHEN cra.last_cra_filing IS NOT NULL
+                  AND cra.last_cra_filing < '{cutoff_date}'
+                 THEN true ELSE false END                                       AS flag_ceased,
+            CASE WHEN cra.last_cra_filing >= fed.last_grant_date
+                  AND cra.last_cra_filing <= fed.last_grant_date + INTERVAL '{window_days} days'
+                 THEN true ELSE false END                                       AS flag_stopped_within_12mo,
+            CASE WHEN COALESCE(cra.avg_gov_dependency, 0) >= {threshold}
+                 THEN true ELSE false END                                       AS flag_high_gov_dependency,
+            CASE WHEN cra.bn_root IS NULL
+                 THEN true ELSE false END                                       AS flag_no_cra_record,
+            CASE WHEN cra.bn_root IS NOT NULL
+                  AND COALESCE(cra.total_private_donations, 0) = 0
+                 THEN true ELSE false END                                       AS flag_zero_private_revenue,
+            CASE WHEN cra.bn_root IS NOT NULL
+                  AND COALESCE(cra.total_program_spend, 0) = 0
+                 THEN true ELSE false END                                       AS flag_zero_program_spend,
+            CASE WHEN COALESCE(comp.total_compensation, 0) > COALESCE(cra.total_program_spend, 0)
+                  AND COALESCE(comp.total_compensation, 0) > 0
+                 THEN true ELSE false END                                       AS flag_comp_exceeds_programs,
+            CASE WHEN fed.fed_total > COALESCE(cra.total_program_spend, 0)
+                 THEN true ELSE false END                                       AS flag_funding_gap,
+            CASE WHEN cra.first_cra_filing IS NOT NULL
+                  AND fed.first_grant_date <= cra.first_cra_filing + INTERVAL '{young_days} days'
+                 THEN true ELSE false END                                       AS flag_young_org,
+            CASE WHEN ct.avg_prior_revenue > 0
+                  AND ct.last_year_revenue < {cliff} * ct.avg_prior_revenue
+                 THEN true ELSE false END                                       AS flag_revenue_cliff
+        FROM general.entity_golden_records gr
+        JOIN      fed_agg  fed  ON fed.bn_root  = gr.bn_root
+        LEFT JOIN cra_agg  cra  ON cra.bn_root  = gr.bn_root
+        LEFT JOIN cra_trend ct  ON ct.bn_root   = gr.bn_root
+        LEFT JOIN comp_agg comp ON comp.bn_root = gr.bn_root
         WHERE gr.status = 'active'
           AND fed.fed_total >= {min_fed}
           AND gr.entity_type IS DISTINCT FROM 'government'

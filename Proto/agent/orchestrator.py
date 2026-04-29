@@ -18,6 +18,7 @@ import json
 import os
 import time
 from decimal import Decimal
+from functools import lru_cache
 import pandas as pd
 import anthropic
 
@@ -520,6 +521,126 @@ Rules:
 """.strip()
 
 
+BUSINESS_REPORT_SYSTEM_PROMPT = """
+You are a federal funding risk analyst writing a business report for a non-technical government audience.
+Use ONLY the data provided. Do not invent numbers or facts.
+Write in plain English. Be direct and specific.
+Return JSON only with this exact shape:
+{
+  "executive_summary": "2-3 sentences: what was reviewed, the headline finding, the single most urgent action",
+  "recommended_actions": ["action 1", "action 2", "action 3"]
+}
+Recommended actions must be specific and prioritised — name the highest-risk entity in action 1.
+""".strip()
+
+
+def _build_report_context(batch_results: list, portfolio_result: dict) -> dict:
+    """Builds the compact input context passed to the LLM (or used by the stub)."""
+    total      = len(batch_results)
+    critical   = sum(1 for r in batch_results if r.overall_risk == "CRITICAL")
+    high       = sum(1 for r in batch_results if r.overall_risk == "HIGH")
+    avg_score  = sum(r.ghost_score for r in batch_results) / max(total, 1)
+    total_fed  = sum(r.fed_total for r in batch_results)
+    total_gap  = sum(r.funding_gap for r in batch_results)
+
+    stats      = portfolio_result.get("portfolio", {})
+    by_prov    = stats.get("by_province", pd.DataFrame())
+    univ_total = portfolio_result.get("total_entities", 0)
+    univ_risky = int(by_prov["risky_count"].sum()) if not by_prov.empty and "risky_count" in by_prov.columns else 0
+
+    sorted_results = sorted(batch_results, key=lambda r: r.ghost_score, reverse=True)
+    entity_lines = [
+        f"{r.overall_risk}|{r.canonical_name}|score {r.ghost_score:.2f}|{','.join(r.top_flags or [])}|{r.province}"
+        for r in sorted_results
+    ]
+
+    return {
+        "aggregate": {
+            "total_analyzed":    total,
+            "critical":          critical,
+            "high":              high,
+            "avg_ghost_score":   round(avg_score, 3),
+            "total_fed_funding": round(total_fed, 0),
+            "total_funding_gap": round(total_gap, 0),
+            "universe_total":    univ_total,
+            "universe_risky":    univ_risky,
+        },
+        "entities": entity_lines,
+    }
+
+
+def run_business_report(batch_results: list, portfolio_result: dict) -> dict:
+    """
+    Returns the two LLM-written sections of the business report:
+      - executive_summary (str)
+      - recommended_actions (list[str])
+
+    STUB — deterministic output until API credentials are available.
+    To activate the LLM, replace the body below with:
+
+        client = anthropic.Anthropic()
+        context = _build_report_context(batch_results, portfolio_result)
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=300,
+            system=BUSINESS_REPORT_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": json.dumps(context, cls=_Encoder)}],
+        )
+        return _parse_json_object(_extract_text(response))
+    """
+    total     = len(batch_results)
+    critical  = sum(1 for r in batch_results if r.overall_risk == "CRITICAL")
+    high      = sum(1 for r in batch_results if r.overall_risk == "HIGH")
+    top       = max(batch_results, key=lambda r: r.ghost_score) if batch_results else None
+    total_gap = sum(r.funding_gap for r in batch_results)
+
+    if critical:
+        headline = f"{critical} of {total} reviewed organization{'s' if total > 1 else ''} reached CRITICAL ghost capacity status"
+    elif high:
+        headline = f"{high} of {total} reviewed organization{'s' if total > 1 else ''} show HIGH-risk ghost capacity patterns"
+    else:
+        headline = f"All {total} reviewed organization{'s' if total > 1 else ''} score below the high-risk threshold"
+
+    top_line = (
+        f" {top.canonical_name} carries the strongest signal at a ghost score of {top.ghost_score:.2f}."
+        if top else ""
+    )
+    gap_line = (
+        f" Combined federal funding gap is ${total_gap:,.0f}."
+        if total_gap > 0 else ""
+    )
+    executive_summary = (
+        headline + "." + top_line + gap_line
+        + " Immediate review is recommended for all CRITICAL and HIGH-rated entities."
+    )
+
+    actions = []
+    if top:
+        actions.append(
+            f"Prioritize audit of {top.canonical_name} (ghost score {top.ghost_score:.2f})"
+            " — request program delivery evidence and employee records."
+        )
+    if total_gap > 0:
+        actions.append(
+            f"Investigate ${total_gap:,.0f} funding gap: federal disbursements exceed"
+            " reported program spend across the reviewed set."
+        )
+    if critical + high > 1:
+        actions.append(
+            f"Refer {critical + high} CRITICAL/HIGH entities to program officers"
+            " for eligibility re-verification before the next funding cycle."
+        )
+    actions.append(
+        "Cross-reference flagged entities against CRA charity revocation lists"
+        " and recent T3010 filings."
+    )
+
+    return {
+        "executive_summary":   executive_summary,
+        "recommended_actions": actions[:4],
+    }
+
+
 def run_narrative_report_from_analysis(analysis_result: dict) -> RiskBrief:
     """
     Phase 2 reporting — one cheap LLM call from an EntityAnalysisResult dict.
@@ -739,11 +860,13 @@ def run_entity_picker_options(search: str = "", limit: int = 100, filters: dict 
     return retrieval.fetch_entity_picker_options(search, limit, filters)
 
 
+@lru_cache(maxsize=1)
 def run_fed_entity_count() -> int:
     return retrieval.fetch_fed_entity_count()
 
 
-def run_way2_scan(
+@lru_cache(maxsize=12)
+def _run_way2_scan_cached(
     min_fed_total: float = 0,
     model_name: str = "ECOD",
     peer_grouping: str = "By entity type + funding band",
@@ -754,12 +877,40 @@ def run_way2_scan(
     within peer groups, and adds human-readable explanations.
     Returns a DataFrame sorted by anomaly_score descending.
     """
-    feature_df = retrieval.fetch_way2_feature_table(min_fed_total=min_fed_total)
+    feature_df = retrieval.fetch_way2_feature_table_fast(min_fed_total=min_fed_total)
     if feature_df.empty:
         return feature_df
     scored_df = analytics.score_way2_anomalies(feature_df, model_name, peer_grouping)
     explained_df = analytics.explain_way2_results(scored_df)
     return explained_df.sort_values("anomaly_score", ascending=False).reset_index(drop=True)
+
+
+def run_way2_scan(
+    min_fed_total: float = 0,
+    model_name: str = "ECOD",
+    peer_grouping: str = "By entity type + funding band",
+) -> pd.DataFrame:
+    return _run_way2_scan_cached(float(min_fed_total), model_name, peer_grouping).copy()
+
+
+@lru_cache(maxsize=24)
+def _run_zombie_heuristics_cached(
+    gov_dependency_threshold: float = 0.70,
+    min_fed_total: float = 0,
+    revenue_cliff_threshold: float = 0.50,
+    ceased_cutoff_year: int = 2023,
+    filing_window_days: int = 365,
+    young_org_years: int = 2,
+) -> pd.DataFrame:
+    """Way 1 — rule-based zombie recipient scan. No LLM."""
+    return retrieval.fetch_zombie_heuristics_fast(
+        gov_dependency_threshold,
+        min_fed_total,
+        revenue_cliff_threshold,
+        ceased_cutoff_year,
+        filing_window_days,
+        young_org_years,
+    )
 
 
 def run_zombie_heuristics(
@@ -770,15 +921,14 @@ def run_zombie_heuristics(
     filing_window_days: int = 365,
     young_org_years: int = 2,
 ) -> pd.DataFrame:
-    """Way 1 — rule-based zombie recipient scan. No LLM."""
-    return retrieval.fetch_zombie_heuristics(
-        gov_dependency_threshold,
-        min_fed_total,
-        revenue_cliff_threshold,
-        ceased_cutoff_year,
-        filing_window_days,
-        young_org_years,
-    )
+    return _run_zombie_heuristics_cached(
+        float(gov_dependency_threshold),
+        float(min_fed_total),
+        float(revenue_cliff_threshold),
+        int(ceased_cutoff_year),
+        int(filing_window_days),
+        int(young_org_years),
+    ).copy()
 
 
 def run_fetch(entity_name: str) -> dict:
@@ -945,16 +1095,16 @@ def run_entity_batch_analysis(flagged_list: list) -> list:
 
 def run_portfolio_analysis(min_fed_total: float = 0) -> dict:
     """
-    Fetches the full entity feature table, computes portfolio stats,
-    and aggregates risk indicators by department.
+    Fast portfolio analysis — uses slim SQL table (flags pre-computed in SQL)
+    and skips ML scoring entirely. department stats run as a separate aggregation query.
     Returns dict: {"portfolio": portfolio_stats, "departments": dept_df,
                    "total_entities": int}
     """
-    feature_df      = retrieval.fetch_way2_feature_table(min_fed_total=min_fed_total)
-    portfolio_stats = analytics.compute_portfolio_stats(feature_df)
+    summary_df      = retrieval.fetch_portfolio_summary_table(min_fed_total=min_fed_total)
+    portfolio_stats = analytics.compute_portfolio_stats_from_flags(summary_df)
     dept_df         = retrieval.fetch_department_stats()
     return {
         "portfolio":      portfolio_stats,
         "departments":    dept_df,
-        "total_entities": len(feature_df),
+        "total_entities": len(summary_df),
     }

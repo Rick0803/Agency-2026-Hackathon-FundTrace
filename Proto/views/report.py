@@ -6,19 +6,21 @@ from dataclasses import asdict, is_dataclass
 
 import pandas as pd
 import streamlit as st
+import altair as alt
 
 from agent.orchestrator import (
-    run_investigation,
     run_narrative_report_from_analysis,
+    run_business_report,
 )
 from views.general import (
     SEVERITY_COLOUR,
     go_to_page,
-    render_selected_entity_banner,
-    selected_entity_query,
     selected_entity_bn,
     selected_entity_name,
 )
+
+
+AGGREGATE_REPORT_LABEL = "All analyzed entities (aggregate)"
 
 
 def _to_plain(value):
@@ -57,6 +59,13 @@ def _compact(value) -> str:
     return "-" if value in (None, "", []) else str(value)
 
 
+def _float_value(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def _analysis_results() -> list:
     results = list(st.session_state.get("batch_analysis_results") or [])
     single = st.session_state.get("report_entity_analysis")
@@ -90,6 +99,29 @@ def _entity_options(results: list) -> list[str]:
         f"{_to_plain(r).get('canonical_name', 'Unknown')} ({_to_plain(r).get('bn_root', '-')})"
         for r in results
     ]
+
+
+def _results_dataframe(results: list) -> pd.DataFrame:
+    return pd.DataFrame([_flatten_for_csv(_to_plain(result)) for result in results])
+
+
+def _aggregate_signal_rows(results: list) -> pd.DataFrame:
+    rows = []
+    for result in results:
+        data = _to_plain(result)
+        for signal in data.get("signals") or []:
+            signal = _to_plain(signal)
+            rows.append({
+                "Organization": data.get("canonical_name", "Unknown"),
+                "BN": data.get("bn_root", "-"),
+                "Signal": signal.get("label", signal.get("dimension", "")),
+                "Severity": signal.get("severity", ""),
+                "Flagged": "Yes" if signal.get("flagged") else "No",
+                "Value": f"{_float_value(signal.get('value')):.3f}",
+                "Threshold": f"{_float_value(signal.get('threshold')):.3f}",
+                "Interpretation": signal.get("interpretation", ""),
+            })
+    return pd.DataFrame(rows)
 
 
 def _flatten_for_csv(data: dict) -> dict:
@@ -137,21 +169,75 @@ def _signal_rows(data: dict) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _signal_chart_rows(data: dict) -> pd.DataFrame:
+    rows = []
+    for signal in data.get("signals") or []:
+        signal = _to_plain(signal)
+        rows.append({
+            "Signal": signal.get("label", signal.get("dimension", "")),
+            "Value": _float_value(signal.get("value")),
+            "Threshold": _float_value(signal.get("threshold")),
+            "Severity": signal.get("severity", ""),
+            "Flagged": "Flagged" if signal.get("flagged") else "Not flagged",
+            "Interpretation": signal.get("interpretation", ""),
+        })
+    return pd.DataFrame(rows)
+
+
+def _insight_lines(data: dict, signal_df: pd.DataFrame) -> list[str]:
+    insights = []
+    flagged = signal_df[signal_df["Flagged"] == "Flagged"] if not signal_df.empty else pd.DataFrame()
+    if not flagged.empty:
+        top_signals = ", ".join(flagged["Signal"].head(3).tolist())
+        insights.append(f"Primary signals to review: {top_signals}.")
+
+    gov_dependency = _float_value(data.get("avg_gov_dependency"))
+    program_ratio = _float_value(data.get("avg_program_ratio"))
+    funding_gap = _float_value(data.get("funding_gap"))
+    employees = int(_float_value(data.get("total_employees")))
+
+    if gov_dependency >= 0.90:
+        insights.append("Government revenue dependency is above the 90% critical threshold.")
+    if data.get("avg_program_ratio") is not None and program_ratio < 0.20:
+        insights.append("Program spending is below 20% of expenses, which is the core delivery-capacity warning.")
+    if funding_gap > 0:
+        insights.append(f"Federal funding exceeds reported program spend by {_money(funding_gap)}.")
+    if employees == 0:
+        insights.append("No reported employees were found across the analyzed CRA years.")
+    if data.get("analysis_notes"):
+        insights.append(str(data["analysis_notes"]))
+
+    if not insights:
+        insights.append("No single signal dominates; use the plots below to compare the profile against thresholds.")
+    return insights[:5]
+
+
+def _bar_with_labels(df: pd.DataFrame, x_col: str, y_col: str, label_col: str,
+                     color: str, height: int = 260) -> alt.Chart:
+    base = alt.Chart(df).encode(
+        x=alt.X(f"{x_col}:Q", title=None),
+        y=alt.Y(f"{y_col}:N", sort="-x", title=None),
+        tooltip=[y_col, label_col],
+    )
+    bars = base.mark_bar(color=color, cornerRadiusEnd=3)
+    labels = base.mark_text(align="right", dx=-6, fontSize=11, color="white").encode(
+        text=alt.Text(f"{label_col}:N")
+    )
+    return (bars + labels).properties(height=height)
+
+
 def _render_entity_selector() -> object:
     results = _analysis_results()
     if not results:
         return None
 
-    current = _matching_analysis_result()
-    options = _entity_options(results)
-    current_label = None
-    if current:
-        current_data = _to_plain(current)
-        current_label = f"{current_data.get('canonical_name', 'Unknown')} ({current_data.get('bn_root', '-')})"
-    index = options.index(current_label) if current_label in options else 0
+    entity_options = _entity_options(results)
+    options = [AGGREGATE_REPORT_LABEL] + entity_options
 
-    selected_label = st.selectbox("Report entity", options, index=index)
-    return results[options.index(selected_label)]
+    selected_label = st.selectbox("Report scope", options, index=0)
+    if selected_label == AGGREGATE_REPORT_LABEL:
+        return results
+    return results[entity_options.index(selected_label)]
 
 
 def _render_run_analysis_prompt() -> None:
@@ -162,9 +248,162 @@ def _render_run_analysis_prompt() -> None:
         go_to_page("Analyze")
 
 
+def _render_aggregate_dashboard(results: list) -> None:
+    df = _results_dataframe(results)
+    if df.empty:
+        _render_run_analysis_prompt()
+        return
+
+    for col in [
+        "ghost_score", "anomaly_score", "fed_total", "funding_gap",
+        "avg_gov_dependency", "avg_program_ratio", "total_employees",
+        "transfers_out_total", "total_compensation", "rules_triggered",
+    ]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0)
+
+    risk_order = ["CRITICAL", "HIGH", "MEDIUM", "LOW", "INSUFFICIENT DATA"]
+    risk_counts = (
+        df["overall_risk"]
+        .fillna("INSUFFICIENT DATA")
+        .value_counts()
+        .reindex(risk_order, fill_value=0)
+        .reset_index()
+    )
+    risk_counts.columns = ["Risk", "Entities"]
+    risk_counts = risk_counts[risk_counts["Entities"] > 0]
+    high_or_critical = int(df["overall_risk"].isin(["CRITICAL", "HIGH"]).sum())
+    top_entity = df.sort_values("ghost_score", ascending=False).iloc[0]
+
+    st.subheader("Aggregate dashboard")
+    st.caption(f"{len(df):,} analyzed organization(s) summarized as one report.")
+
+    st.divider()
+    st.subheader("KPIs")
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Entities", f"{len(df):,}")
+    k2.metric("Critical / High", f"{high_or_critical:,}")
+    k3.metric("Avg Ghost Score", f"{df['ghost_score'].mean():.3f}")
+    k4.metric("Federal Funding", _money(df["fed_total"].sum()))
+
+    k5, k6, k7, k8 = st.columns(4)
+    k5.metric("Funding Gap", _money(df["funding_gap"].sum()))
+    k6.metric("Avg Gov Revenue Share", _pct(df["avg_gov_dependency"].mean()))
+    k7.metric("Avg Program Spend Share", _pct(df["avg_program_ratio"].mean()))
+    k8.metric("Zero-Employee Entities", f"{int((df['total_employees'] == 0).sum()):,}")
+
+    st.divider()
+    st.subheader("Plots")
+    plot_left, plot_right = st.columns(2)
+    with plot_left:
+        st.markdown("**Risk Distribution**")
+        if risk_counts.empty:
+            st.info("No risk labels were returned.")
+        else:
+            st.altair_chart(
+                _bar_with_labels(risk_counts, "Entities", "Risk", "Entities", "#E15759"),
+                use_container_width=True,
+            )
+
+    with plot_right:
+        st.markdown("**Top Entities by Ghost Score**")
+        top_df = df.sort_values("ghost_score", ascending=False).head(10).copy()
+        top_df["Label"] = top_df["ghost_score"].map(lambda value: f"{value:.3f}")
+        top_df["Organization"] = top_df["canonical_name"].fillna("Unknown").str.slice(0, 42)
+        st.altair_chart(
+            _bar_with_labels(top_df, "ghost_score", "Organization", "Label", "#4C78A8", height=320),
+            use_container_width=True,
+        )
+
+    bottom_left, bottom_right = st.columns(2)
+    with bottom_left:
+        st.markdown("**Aggregate Financial Exposure**")
+        money_df = pd.DataFrame([
+            {"Metric": "Federal funding", "Value": df["fed_total"].sum(), "Label": _money(df["fed_total"].sum())},
+            {"Metric": "Funding gap", "Value": df["funding_gap"].sum(), "Label": _money(df["funding_gap"].sum())},
+            {"Metric": "Transfers out", "Value": df["transfers_out_total"].sum(), "Label": _money(df["transfers_out_total"].sum())},
+            {"Metric": "Compensation", "Value": df["total_compensation"].sum(), "Label": _money(df["total_compensation"].sum())},
+        ])
+        money_df = money_df[money_df["Value"] > 0]
+        if money_df.empty:
+            st.info("No positive financial exposure values were returned.")
+        else:
+            st.altair_chart(
+                _bar_with_labels(money_df, "Value", "Metric", "Label", "#76B7B2"),
+                use_container_width=True,
+            )
+
+    with bottom_right:
+        st.markdown("**Most Common Triggered Signals**")
+        signal_df = _aggregate_signal_rows(results)
+        flagged_df = signal_df[signal_df["Flagged"] == "Yes"] if not signal_df.empty else pd.DataFrame()
+        if flagged_df.empty:
+            st.info("No triggered signal rows were returned.")
+        else:
+            signal_counts = (
+                flagged_df["Signal"]
+                .value_counts()
+                .head(10)
+                .reset_index()
+            )
+            signal_counts.columns = ["Signal", "Entities"]
+            st.altair_chart(
+                _bar_with_labels(signal_counts, "Entities", "Signal", "Entities", "#59A14F", height=320),
+                use_container_width=True,
+            )
+
+    st.divider()
+    st.subheader("Key Ideas")
+    st.markdown(f"- {high_or_critical:,} of {len(df):,} analyzed organizations are ranked CRITICAL or HIGH.")
+    st.markdown(
+        f"- Highest-risk entity is {top_entity.get('canonical_name', 'Unknown')} "
+        f"with a ghost score of {top_entity.get('ghost_score', 0):.3f}."
+    )
+    if df["funding_gap"].sum() > 0:
+        st.markdown(f"- Combined funding gap across analyzed entities is {_money(df['funding_gap'].sum())}.")
+    if df["avg_gov_dependency"].mean() >= 0.80:
+        st.markdown("- The aggregate set shows very high government revenue dependency.")
+
+    st.divider()
+    st.subheader("Signal Details")
+    with st.expander("View Aggregate Signal Details", expanded=False):
+        signal_df = _aggregate_signal_rows(results)
+        if signal_df.empty:
+            st.info("No signal rows were returned.")
+        else:
+            st.dataframe(signal_df, use_container_width=True, hide_index=True)
+
+    st.divider()
+    st.subheader("Exports")
+    e1, e2, e3 = st.columns(3)
+    e1.download_button(
+        "Download Aggregate JSON",
+        data=json.dumps([_to_plain(result) for result in results], indent=2, default=str),
+        file_name="aggregate-risk-report.json",
+        mime="application/json",
+        use_container_width=True,
+    )
+    e2.download_button(
+        "Download Aggregate CSV",
+        data=df.to_csv(index=False),
+        file_name="aggregate-risk-report.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+    e3.download_button(
+        "Download Aggregate Signals CSV",
+        data=_aggregate_signal_rows(results).to_csv(index=False),
+        file_name="aggregate-risk-signals.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+
 def _render_risk_card(result) -> None:
     data = _to_plain(result)
     icon = SEVERITY_COLOUR.get(data.get("overall_risk"), "⚪")
+    signals_df = _signal_rows(data)
+    signal_chart_df = _signal_chart_rows(data)
 
     st.subheader(f"{icon} {data.get('canonical_name', 'Unknown')} — {data.get('overall_risk', 'UNKNOWN')} RISK")
     st.caption(
@@ -174,43 +413,138 @@ def _render_risk_card(result) -> None:
         f"Confidence: {data.get('confidence') or '-'}"
     )
 
+    st.divider()
+    st.subheader("KPIs")
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Ghost Score", f"{float(data.get('ghost_score') or 0):.3f}")
+    m1.metric("Ghost Score", f"{_float_value(data.get('ghost_score')):.3f}")
     m2.metric("Federal Funding", _money(data.get("fed_total")))
     m3.metric("Funding Gap", _money(data.get("funding_gap")))
-    m4.metric("CRA Years", data.get("cra_years", 0))
+    m4.metric("Anomaly Score", f"{_float_value(data.get('anomaly_score')):.3f}")
 
     s1, s2, s3, s4 = st.columns(4)
     s1.metric("Gov Revenue Share", _pct(data.get("avg_gov_dependency")))
     s2.metric("Program Spend Share", _pct(data.get("avg_program_ratio")))
-    s3.metric("Employees", f"{int(data.get('total_employees') or 0):,}")
+    s3.metric("Employees", f"{int(_float_value(data.get('total_employees'))):,}")
     s4.metric("Transfers Out", _money(data.get("transfers_out_total")))
 
-    st.markdown("**Summary**")
+    # Coverage data is intentionally hidden for the hackathon dashboard, but
+    # kept here so it can be restored quickly.
+    # st.markdown("**Coverage**")
+    # t1, t2, t3, t4 = st.columns(4)
+    # t1.metric("First Grant", _compact(data.get("first_grant_date")))
+    # t2.metric("Last Grant", _compact(data.get("last_grant_date")))
+    # t3.metric("Last CRA Filing", _compact(data.get("last_cra_filing")))
+    # t4.metric("CRA Years", data.get("cra_years", 0))
+    #
+    # coverage = []
+    # coverage.append("CRA data found" if data.get("has_cra_data") else "CRA data missing")
+    # coverage.append("FED data found" if data.get("has_fed_data") else "FED data missing")
+    # st.caption(" | ".join(coverage) + f" | Persistence: {_compact(data.get('persistence'))}")
+
+    st.divider()
+    st.subheader("Plots")
+
+    plot_left, plot_right = st.columns(2)
+    with plot_left:
+        st.markdown("**Signals vs Thresholds**")
+        if signal_chart_df.empty:
+            st.info("No signal rows were returned for this entity.")
+        else:
+            bars = alt.Chart(signal_chart_df).mark_bar(cornerRadiusEnd=3).encode(
+                x=alt.X("Value:Q", title="Observed normalized value", scale=alt.Scale(domain=[0, 1])),
+                y=alt.Y("Signal:N", sort="-x", title=None),
+                color=alt.Color(
+                    "Severity:N",
+                    scale=alt.Scale(
+                        domain=["CRITICAL", "HIGH", "MEDIUM", "LOW"],
+                        range=["#D62728", "#FF7F0E", "#E3B341", "#4C78A8"],
+                    ),
+                    legend=None,
+                ),
+                tooltip=["Signal", "Flagged", "Value", "Threshold", "Interpretation"],
+            )
+            labels = alt.Chart(signal_chart_df).mark_text(
+                align="right", dx=-6, fontSize=11, color="white"
+            ).encode(
+                x=alt.X("Value:Q", scale=alt.Scale(domain=[0, 1])),
+                y=alt.Y("Signal:N", sort="-x"),
+                text=alt.Text("Value:Q", format=".3f"),
+            )
+            thresholds = alt.Chart(signal_chart_df).mark_tick(
+                color="#111827", thickness=2, size=18
+            ).encode(
+                x="Threshold:Q",
+                y=alt.Y("Signal:N", sort="-x"),
+                tooltip=["Signal", "Threshold"],
+            )
+            st.altair_chart((bars + labels + thresholds).properties(height=260), use_container_width=True)
+
+    with plot_right:
+        st.markdown("**Financial Exposure**")
+        money_df = pd.DataFrame([
+            {"Metric": "Federal funding", "Value": _float_value(data.get("fed_total")), "Label": _money(data.get("fed_total"))},
+            {"Metric": "Funding gap", "Value": _float_value(data.get("funding_gap")), "Label": _money(data.get("funding_gap"))},
+            {"Metric": "Transfers out", "Value": _float_value(data.get("transfers_out_total")), "Label": _money(data.get("transfers_out_total"))},
+            {"Metric": "Compensation", "Value": _float_value(data.get("total_compensation")), "Label": _money(data.get("total_compensation"))},
+        ])
+        money_df = money_df[money_df["Value"] > 0]
+        if money_df.empty:
+            st.info("No positive financial exposure values were returned.")
+        else:
+            st.altair_chart(
+                _bar_with_labels(money_df, "Value", "Metric", "Label", "#4C78A8"),
+                use_container_width=True,
+            )
+
+    ratio_left, timeline_right = st.columns(2)
+    with ratio_left:
+        st.markdown("**Risk Ratios**")
+        ratio_df = pd.DataFrame([
+            {"Metric": "Ghost score", "Value": _float_value(data.get("ghost_score")), "Label": f"{_float_value(data.get('ghost_score')):.3f}"},
+            {"Metric": "Anomaly score", "Value": _float_value(data.get("anomaly_score")), "Label": f"{_float_value(data.get('anomaly_score')):.3f}"},
+            {"Metric": "Gov revenue share", "Value": _float_value(data.get("avg_gov_dependency")), "Label": _pct(data.get("avg_gov_dependency"))},
+            {"Metric": "Program spend share", "Value": _float_value(data.get("avg_program_ratio")), "Label": _pct(data.get("avg_program_ratio"))},
+        ])
+        st.altair_chart(
+            _bar_with_labels(ratio_df, "Value", "Metric", "Label", "#59A14F"),
+            use_container_width=True,
+        )
+
+    with timeline_right:
+        st.markdown("**Timeline**")
+        timeline_df = pd.DataFrame([
+            {"Event": "First grant", "Date": data.get("first_grant_date")},
+            {"Event": "Last grant", "Date": data.get("last_grant_date")},
+            {"Event": "Last CRA filing", "Date": data.get("last_cra_filing")},
+        ])
+        timeline_df["Date"] = pd.to_datetime(timeline_df["Date"], errors="coerce")
+        timeline_df = timeline_df.dropna(subset=["Date"])
+        if timeline_df.empty:
+            st.info("No timeline dates were returned.")
+        else:
+            timeline_chart = alt.Chart(timeline_df).mark_circle(size=130, color="#E15759").encode(
+                x=alt.X("Date:T", title=None),
+                y=alt.Y("Event:N", sort=None, title=None),
+                tooltip=["Event", alt.Tooltip("Date:T", format="%Y-%m-%d")],
+            ).properties(height=260)
+            st.altair_chart(timeline_chart, use_container_width=True)
+
+    st.divider()
+    st.subheader("Key Ideas")
     st.write(data.get("explanation") or "No explanation generated.")
+    for insight in _insight_lines(data, signal_chart_df):
+        st.markdown(f"- {insight}")
 
-    st.markdown("**Timeline and Coverage**")
-    t1, t2, t3, t4 = st.columns(4)
-    t1.metric("First Grant", _compact(data.get("first_grant_date")))
-    t2.metric("Last Grant", _compact(data.get("last_grant_date")))
-    t3.metric("Last CRA Filing", _compact(data.get("last_cra_filing")))
-    t4.metric("Persistence", _compact(data.get("persistence")))
+    st.divider()
+    st.subheader("Signal Details")
+    with st.expander("View Signal Details", expanded=False):
+        if signals_df.empty:
+            st.info("No signal rows were returned for this entity.")
+        else:
+            st.dataframe(signals_df, use_container_width=True, hide_index=True)
 
-    coverage = []
-    coverage.append("CRA data found" if data.get("has_cra_data") else "CRA data missing")
-    coverage.append("FED data found" if data.get("has_fed_data") else "FED data missing")
-    st.caption(" | ".join(coverage))
-    if data.get("analysis_notes"):
-        st.warning(data["analysis_notes"])
-
-    st.markdown("**Signal Breakdown**")
-    signals_df = _signal_rows(data)
-    if signals_df.empty:
-        st.info("No signal rows were returned for this entity.")
-    else:
-        st.dataframe(signals_df, use_container_width=True, hide_index=True)
-
-    st.markdown("**Exports**")
+    st.divider()
+    st.subheader("Exports")
     json_data = json.dumps(data, indent=2, default=str)
     csv_data = pd.DataFrame([_flatten_for_csv(data)]).to_csv(index=False)
     signal_csv = signals_df.to_csv(index=False) if not signals_df.empty else ""
@@ -335,67 +669,173 @@ def _render_portfolio_tab() -> None:
         )
 
 
-def _render_legacy_deep_investigation() -> None:
-    st.warning(
-        "This is the older full agent loop. It fetches and computes through the LLM, "
-        "so it is slower and more expensive than the structured report tabs."
-    )
-    default_query = selected_entity_query("Investigate")
-    query = st.text_area(
-        "Query",
-        value=default_query,
-        placeholder="e.g. Investigate GITES JEUNESSE INC for ghost capacity",
-        height=80,
-        key=f"legacy_report_query_{selected_entity_bn() or selected_entity_name()}",
-    )
+def _build_report_markdown(summary: str, actions: list[str], results: list, portfolio_result: dict) -> str:
+    lines = ["# ZombieTrace Business Report", ""]
+    lines += ["## Executive Summary", summary, ""]
+    lines += ["## Risk Overview", ""]
 
-    if st.button("Run Deep Investigation", type="primary") and query.strip():
-        with st.spinner("Agent is investigating..."):
-            brief = run_investigation(query.strip())
-        st.session_state["legacy_risk_brief"] = brief
+    total     = len(results)
+    critical  = sum(1 for r in results if r.overall_risk == "CRITICAL")
+    high      = sum(1 for r in results if r.overall_risk == "HIGH")
+    avg_score = sum(r.ghost_score for r in results) / max(total, 1)
+    total_fed = sum(r.fed_total for r in results)
+    total_gap = sum(r.funding_gap for r in results)
+    stats     = portfolio_result.get("portfolio", {})
+    by_prov   = stats.get("by_province", pd.DataFrame())
+    univ_total = portfolio_result.get("total_entities", 0)
+    univ_risky = int(by_prov["risky_count"].sum()) if not by_prov.empty and "risky_count" in by_prov.columns else 0
 
-    brief = st.session_state.get("legacy_risk_brief")
-    if not brief:
+    lines += [
+        f"| Metric | Value |",
+        f"|---|---|",
+        f"| Entities Analyzed | {total} |",
+        f"| Critical | {critical} |",
+        f"| High | {high} |",
+        f"| Avg Ghost Score | {avg_score:.3f} |",
+        f"| Total Federal Funding | {_money(total_fed)} |",
+        f"| Total Funding Gap | {_money(total_gap)} |",
+        f"| Universe Entities | {univ_total:,} |",
+        f"| Universe Risky | {univ_risky:,} |",
+        "",
+    ]
+
+    lines += ["## Entity Findings", ""]
+    lines += ["| Organization | Risk | Ghost Score | Province | Top Flags |", "|---|---|---|---|---|"]
+    for r in sorted(results, key=lambda x: x.ghost_score, reverse=True):
+        data = _to_plain(r)
+        flags = ", ".join(data.get("top_flags") or [])
+        lines.append(
+            f"| {data.get('canonical_name','-')} | {data.get('overall_risk','-')} "
+            f"| {_float_value(data.get('ghost_score')):.3f} | {data.get('province','-')} | {flags} |"
+        )
+    lines.append("")
+
+    lines += ["## Recommended Actions", ""]
+    for i, action in enumerate(actions, 1):
+        lines.append(f"{i}. {action}")
+    lines.append("")
+
+    return "\n".join(lines)
+
+
+def _render_business_report_tab() -> None:
+    batch_results    = list(st.session_state.get("batch_analysis_results") or [])
+    portfolio_result = st.session_state.get("portfolio_results") or {}
+
+    if not batch_results:
+        _render_run_analysis_prompt()
         return
 
-    data = _to_plain(brief)
-    icon = SEVERITY_COLOUR.get(data.get("overall_risk"), "⚪")
-    st.subheader(f"{icon} {data.get('entity', 'Unknown')} — {data.get('overall_risk', 'UNKNOWN')} RISK")
-    st.caption(f"Confidence: {data.get('confidence', '-')}")
-    st.write(data.get("summary", ""))
+    st.caption(
+        "One-click report combining deterministic findings with an AI-written summary. "
+        "LLM sections are stubs until API credentials are available tomorrow."
+    )
+
+    if st.button("Generate Business Report", type="primary"):
+        with st.spinner("Building report..."):
+            result = run_business_report(batch_results, portfolio_result)
+        st.session_state["business_report"] = result
+
+    report = st.session_state.get("business_report")
+    if not report:
+        return
+
+    summary = report.get("executive_summary", "")
+    actions = report.get("recommended_actions", [])
+
+    # ── Executive Summary (LLM) ───────────────────────────────────────────────
+    st.subheader("Executive Summary")
+    st.info(summary)
+
+    st.divider()
+
+    # ── Risk Overview (deterministic) ─────────────────────────────────────────
+    st.subheader("Risk Overview")
+    total     = len(batch_results)
+    critical  = sum(1 for r in batch_results if r.overall_risk == "CRITICAL")
+    high      = sum(1 for r in batch_results if r.overall_risk == "HIGH")
+    avg_score = sum(r.ghost_score for r in batch_results) / max(total, 1)
+    total_fed = sum(r.fed_total for r in batch_results)
+    total_gap = sum(r.funding_gap for r in batch_results)
+    stats     = portfolio_result.get("portfolio", {})
+    by_prov   = stats.get("by_province", pd.DataFrame())
+    univ_total = portfolio_result.get("total_entities", 0)
+    univ_risky = int(by_prov["risky_count"].sum()) if not by_prov.empty and "risky_count" in by_prov.columns else 0
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Entities Analyzed", total)
+    c2.metric("Critical / High", f"{critical} / {high}")
+    c3.metric("Avg Ghost Score", f"{avg_score:.3f}")
+    c4.metric("Total Funding Gap", _money(total_gap))
+
+    c5, c6, _, __ = st.columns(4)
+    c5.metric("Total Federal Funding", _money(total_fed))
+    c6.metric("Universe Risky", f"{univ_risky:,} of {univ_total:,}")
+
+    st.divider()
+
+    # ── Entity Findings (deterministic) ──────────────────────────────────────
+    st.subheader("Entity Findings")
+    rows = []
+    for r in sorted(batch_results, key=lambda x: x.ghost_score, reverse=True):
+        data = _to_plain(r)
+        colour = SEVERITY_COLOUR.get(data.get("overall_risk"), "⚪")
+        rows.append({
+            "Organization": data.get("canonical_name", "-"),
+            "Risk":         f"{colour} {data.get('overall_risk', '-')}",
+            "Ghost Score":  f"{_float_value(data.get('ghost_score')):.3f}",
+            "Province":     data.get("province", "-"),
+            "Fed Funding":  _money(data.get("fed_total")),
+            "Funding Gap":  _money(data.get("funding_gap")),
+            "Top Flags":    ", ".join(data.get("top_flags") or []),
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    st.divider()
+
+    # ── Recommended Actions (LLM) ─────────────────────────────────────────────
+    st.subheader("Recommended Actions")
+    for i, action in enumerate(actions, 1):
+        st.markdown(f"**{i}.** {action}")
+
+    st.divider()
+
+    # ── Download ──────────────────────────────────────────────────────────────
+    md = _build_report_markdown(summary, actions, batch_results, portfolio_result)
     st.download_button(
-        "Download Deep Investigation JSON",
-        data=json.dumps(data, indent=2, default=str),
-        file_name=f"deep-risk-brief-{data.get('entity', 'entity')[:30].replace(' ', '-')}.json",
-        mime="application/json",
+        "Download Report (Markdown)",
+        data=md,
+        file_name="zombietrace-business-report.md",
+        mime="text/markdown",
+        use_container_width=False,
     )
 
 
 def render_report() -> None:
-    st.title("Public Funding Risk Intelligence Agent")
+    st.title("ZombieTrace")
     st.subheader("Report Mode")
     st.caption("Render structured risk reports from deterministic analysis, with optional LLM-written narrative.")
-    render_selected_entity_banner()
 
-    tab_micro, tab_narrative, tab_macro, tab_legacy = st.tabs([
-        "Entity Risk Card",
-        "Narrative Brief",
-        "Portfolio Reports",
-        "Deep Investigation",
+    tab_entity_card, tab_business = st.tabs([
+        "Dashboard",
+        "Business Report",
     ])
 
-    with tab_micro:
+    with tab_entity_card:
         result = _render_entity_selector()
-        if result:
+        if isinstance(result, list):
+            _render_aggregate_dashboard(result)
+        elif result:
             _render_risk_card(result)
         else:
             _render_run_analysis_prompt()
 
-    with tab_narrative:
-        _render_narrative_tab(_matching_analysis_result())
+    # with tab_report:
+    #     st.subheader("Narrative Brief")
+    #     _render_narrative_tab(_matching_analysis_result())
+    #     st.divider()
+    #     st.subheader("Portfolio Reports")
+    #     _render_portfolio_tab()
 
-    with tab_macro:
-        _render_portfolio_tab()
-
-    with tab_legacy:
-        _render_legacy_deep_investigation()
+    with tab_business:
+        _render_business_report_tab()
