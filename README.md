@@ -1,237 +1,182 @@
-<<<<<<< HEAD
-# AI For Accountability Hackathon
+# FundTrace
 
-A multi-dataset analysis platform for Canadian government transparency and accountability research, built for the **AI For Accountability Hackathon** (April 29, 2026).
+> AI-powered ghost capacity detection for Canadian public funding
 
-## Overview
+[![Python](https://img.shields.io/badge/Python-3.11+-3776AB?logo=python&logoColor=white)](https://python.org)
+[![Streamlit](https://img.shields.io/badge/Streamlit-1.30+-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io)
+[![Claude AI](https://img.shields.io/badge/Claude_AI-Anthropic-6B4EFF)](https://anthropic.com)
+[![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14+-336791?logo=postgresql&logoColor=white)](https://postgresql.org)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Hackathon](https://img.shields.io/badge/Agency_2026-AI_For_Accountability-orange)](https://github.com/Rick0803/Agency-2026-Hackathon-FundTrace)
 
-This repository unifies four major sources of Canadian government open data into a single PostgreSQL database, with each dataset in its own schema so tables never collide. On top of that raw data sits a **cross-dataset entity resolution pipeline** that reconciles ~1 million source records into ~851,000 canonical organizations, each with a golden record linking every funding stream across CRA charity filings, federal grants, and Alberta grants/contracts/sole-source.
+---
 
-All data is redistributed under the original publishers' open-government licences — Canada Revenue Agency T3010 filings, federal Grants & Contributions disclosures, and Alberta open data. See [ATTRIBUTIONS.md](ATTRIBUTIONS.md) for data sources and third-party library credits.
+Canada distributes tens of billions in annual grants and contributions to hundreds of thousands of organizations. Detecting **ghost capacity** — recipients that continue receiving public money while showing weak signs of operational activity, delivery, or financial health — requires cross-referencing filing histories, spending patterns, employee counts, and revenue sources across multiple disconnected government datasets. That's exactly what FundTrace automates.
 
-## Prerequisites
+Built at the **Agency 2026 AI For Accountability Hackathon** (April 29, 2026).
 
-| Component | Version | Notes |
-|-----------|---------|-------|
-| **Node.js** | 18 or newer | Required by every module |
-| **Python** | 3.10 or newer | Required only for the Splink stage of the entity-resolution pipeline |
-| **PostgreSQL** | 14 or newer | With the `pg_trgm` extension enabled |
-| **Disk space** | ~20 GB | Full local database copy (~13 GB JSONL data bundle + loaded tables + indexes). Splink's intermediate parquet files add ~60 MB on top while that stage is running. |
-| **Memory** | 4 GB minimum, 8 GB recommended | The Splink + LLM-pipeline stages benefit from more RAM; everything else is light. |
+---
 
-### Credentials
-
-> **Hackathon participants:** the `.env.public` files for each module (`CRA/`, `FED/`, `AB/`, `general/`) are **distributed by the hackathon organizers in the info pack provided on event day (April 29, 2026)**. Drop the info-pack files into their matching module directories before running any `npm run` commands that touch the database. Without them a fresh clone cannot connect to the shared database. See [SECURITY.md](SECURITY.md) for details and for what to do if you want to run against your own local Postgres instead (no info pack needed).
-
-## Architecture
+## The Investigation Workflow
 
 ```
-hackathon/
-├── CRA/             # CRA T3010 Charity Data (cra schema)
-├── FED/             # Federal Grants & Contributions (fed schema)
-├── AB/              # Alberta Open Data (ab schema)
-├── general/         # Cross-dataset entity resolution pipeline (general schema)
-├── .local-db/       # Recreate the hackathon database in your own Postgres
-├── index.html       # Landing page / documentation browser
-├── ATTRIBUTIONS.md  # Third-party libraries and data source citations
-├── SECURITY.md      # Credentials, .env convention, data sensitivity
-├── tests/           # Cross-module unit + integration tests
-├── LICENSE          # MIT (covers source code — NOT the data, which follows
-│                      the original open-government licences)
-└── README.md        # This file
+┌─────────────────────┐    ┌──────────────────┐    ┌─────────────────┐    ┌──────────────────┐
+│  1. Search Orgs     │───▶│  2. Shortlist     │───▶│  3. Analyze     │───▶│  4. Report       │
+│                     │    │                  │    │                 │    │                  │
+│  User-Defined Rules │    │  Include/exclude  │    │  Ghost scoring  │    │  Dashboard       │
+│  Anomaly Detection  │    │  Curate & review  │    │  Risk labels    │    │  Business Report │
+│  AI scan summary    │    │  Elevate to step 3│    │  AI narrative   │    │  PDF export      │
+└─────────────────────┘    └──────────────────┘    └─────────────────┘    └──────────────────┘
 ```
 
-All four data modules share the same PostgreSQL database on Render (`cra`, `fed`, `ab`, `general` schemas). Every module follows the same conventions:
+---
 
-- **`.env.public`** — shared read-only credentials, **gitignored** (distributed by the hackathon organizers in the event-day info pack)
-- **`.env`** — personal admin overrides, gitignored
-- `.env.public` loads first; `.env` overrides
+## Key Features
 
-## Datasets
+### 🔍 Dual Discovery Methods
 
-### CRA — Canada Revenue Agency T3010 Charity Data
+| Method | Approach |
+|--------|----------|
+| **User-Defined Rules** | 10 configurable heuristic rules with adjustable thresholds — went dark after grants, stopped filing within 12 months, zero employees, funding gap, revenue cliff, and more |
+| **Anomaly Detection (AI)** | Peer-relative unsupervised ML (ECOD, Isolation Forest, LOF) scores each entity against organizations in the same funding band and entity type — surfaces patterns rules miss |
 
-**Schema:** `cra` · **Rows:** ~8.76M (7.3M T3010 raw + ~1.42M pre-computed analysis) · **Tables:** 49 + 3 views · **Years:** 2020–2024
+### 📊 Ghost Capacity Scoring
 
-Annual filings from ~85,000 registered Canadian charities: financial statements, directors, gift flows between charities, program descriptions. Also includes pre-computed accountability-analysis tables (loop detection across 2–6 hops, SCC decomposition, overhead rollups, government-funding breakdown, T3010 data-quality violation flags, donee-name quality scoring).
+Five-dimension composite score (0–1) per entity:
 
-```bash
-cd CRA && npm install && npm run setup
-```
+| Dimension | Weight |
+|-----------|--------|
+| Program delivery deficit | 30% |
+| Government revenue dependency | 25% |
+| Compensation burden | 20% |
+| Pass-through transfers | 15% |
+| Zero reported employees | 10% |
 
-Features: circular-gifting detection, 0–30 risk scoring, SCC + Johnson's algorithm cross-validation, interactive charity lookup + risk profiling.
+Every score comes with a risk label (CRITICAL / HIGH / MEDIUM / LOW), a confidence rating, signal-level evidence, and interpretations grounded in the actual data.
 
-### FED — Federal Grants & Contributions
+### 🤖 Claude-Powered Narratives
 
-**Schema:** `fed` · **Rows:** ~1.275M · **Tables:** 6 + 3 views
+LLM integration at every reporting stage:
 
-Every federal grant, contribution, and transfer payment from 51+ departments to 422K+ recipients, as published via the Government of Canada Open Data portal.
+- **Scan summary** — executive briefing on scan coverage and top findings
+- **Analysis narrative** — 200-word executive paragraph for decision-makers
+- **Entity narrative brief** — 3–4 paragraph dossier on the highest-risk findings
+- **Business Report** — full structured briefing note with situation overview, key findings, risk assessment, and recommendations
 
-```bash
-cd FED && npm install && npm run setup
-```
+### 📄 Audit-Ready Exports
 
-Features: 7-dimension risk scoring (0–35), provincial-equity analysis, amendment creep, recipient concentration (HHI), cross-reference with CRA registry.
+- Per-entity JSON and CSV
+- Aggregate signal CSVs
+- Full business report in JSON and **PDF** (formatted, paginated, ready to file)
 
-### AB — Alberta Open Data
+---
 
-**Schema:** `ab` · **Rows:** ~2.61M · **Tables:** 9 + 3 views · **Years:** 2014–2026
+## Data Scale
 
-| Dataset | Table | Rows |
-|---------|-------|------|
-| Alberta Grants | `ab_grants` | 1,986,676 |
-| Blue Book Contracts | `ab_contracts` | 67,079 |
-| Sole-Source Contracts | `ab_sole_source` | 15,533 |
-| Non-Profit Registry | `ab_non_profit` | 69,271 |
+| Dataset | Rows | Coverage |
+|---------|------|----------|
+| CRA T3010 Charity Filings | ~8.76M | 2020–2024, ~85K registered charities |
+| Federal Grants & Contributions | ~1.275M | 51+ departments, 422K+ recipients |
+| Alberta Open Data (grants, contracts, sole-source, non-profits) | ~2.61M | 2014–2026 |
+| **Unified golden records** | **~851K canonical organizations** | Cross-dataset entity resolution |
 
-```bash
-cd AB && npm install && npm run setup
-```
+### Entity Resolution Pipeline
 
-Features: sole-source deep dive (repeat vendors, contract splitting, geographic concentration), grant/contract ratio analysis, non-profit lifecycle + sector-health scoring, 6 advanced analysis scripts producing JSON + TXT reports.
+The same organization can appear under dozens of name variants across three datasets with multiple Business Number suffix variants. FundTrace reconciles them into one canonical golden record per real-world organization using:
 
-### general — Cross-Dataset Entity Resolution
+1. **Deterministic matching** — BN anchoring + exact/normalized name + trade-name extraction
+2. **Probabilistic record linkage** via [Splink](https://moj-analytical-services.github.io/splink/) (UK MoJ's Fellegi-Sunter implementation)
+3. **LLM-confirmed merges** — Claude decides SAME / RELATED / DIFFERENT per candidate pair and authors the canonical golden record
 
-**Schema:** `general` · **Rows:** ~10.5M · **Tables:** 14 + 2 views
+Result: **~851K golden records**, ~5.2M source links, ~67K LLM-confirmed merges.
 
-The module that unifies everything else. Produces one canonical **golden record** per real-world organization, linked to every source row that contributed to it. After a full pipeline run: **~851K golden records**, ~5.2M source links, ~67K LLM-confirmed merges, ~65K RELATED cross-links.
+---
 
-```bash
-cd general && npm install && npm run setup
-```
+## Tech Stack
 
-See the [Entity Resolution](#entity-resolution) section below + [general/README.md](general/README.md) for the full pipeline.
+| Layer | Technology |
+|-------|-----------|
+| UI Framework | Streamlit |
+| AI / LLM | Claude API (Anthropic SDK) |
+| Anomaly Detection | PyOD — ECOD, Isolation Forest, LOF |
+| Entity Resolution | Splink (probabilistic record linkage) |
+| Database | PostgreSQL 14+ with `pg_trgm` |
+| Data Processing | pandas, NumPy, SciPy |
+| Visualization | Altair |
+| PDF Generation | fpdf2 |
+| Data Pipelines | Node.js (per-dataset ETL modules) |
 
-## Entity Resolution
+---
 
-The core challenge across these datasets: the same organization appears under dozens of name variations. A typical mid-sized registered charity operating across all three datasets will have 10+ distinct name variants in the source data, spread across 6 tables, with multiple Business Number suffix variants (the `RR` charity account, the `RC` corporate-tax account, the `RP` payroll account). Without reconciling them to one canonical entity, cross-dataset accountability analysis is impossible.
-
-The `general` module combines three complementary techniques:
-
-1. **Deterministic matching** — business-number anchoring + exact + normalized-name + trade-name extraction, walked across the six source tables in trust order (CRA first, federal next, Alberta last). Catches the easy cases.
-2. **Probabilistic matching via [Splink](https://moj-analytical-services.github.io/splink/)** — UK Ministry of Justice's Fellegi-Sunter record-linkage library, with feature weights learned from the data via expectation-maximization. Catches hierarchical organizations, truncated variants, and no-BN cross-dataset matches that rules miss.
-3. **LLM verdict and authoring** — Claude Sonnet 4.6, 100+100 concurrent workers against Anthropic's direct API and Google Vertex AI in parallel. The LLM decides SAME / RELATED / DIFFERENT per candidate pair and, when SAME, *authors the canonical golden record* (canonical name, entity type, exhaustive alias list) in the same call.
-
-The output is a single `entity_golden_records` table — one row per real-world organization — with canonical name, every observed alias, primary BN + all variants, per-dataset profiles (CRA registration + financials, federal grants summary, Alberta totals), addresses, merge history, and cross-references to related entities.
-
-### Two browser tools (run both simultaneously)
-
-- **Pipeline Dashboard** at `http://localhost:3800` (`npm run entities:dashboard`) — operator interface. Reset, migrate, and run each pipeline stage with one-click buttons; streaming log for each. Real-time metrics on entity counts, source links, Splink build status, LLM progress + ETA. Six test-entity sanity cards flag regressions instantly.
-- **Dossier Explorer** at `http://localhost:3801` (`npm run entities:dossier`) — analyst interface. Search by name or BN, view the complete per-entity dossier (7 tabs: Overview, CRA T3010 by year, Qualified Donees, Source Links, Related / maybe-merge, Accountability flags, International, Merge History, Raw JSON). Multi-select merge from search results. Full-dossier JSON download including pre-aggregated combined view across any browser-merged entities.
-
-Key design principles:
-
-- **BN is the primary identifier** — every stage treats the 9-digit Canadian Business Number root as authoritative.
-- **Every stage is idempotent and resumable** — interruptions pick up cleanly.
-- **Every stage is observable** — dashboard polls the database directly; no separate event stream to drift out of sync.
-
-See [general/README.md](general/README.md) for the full pipeline documentation (seven stages, libraries, outcomes, year-alignment conventions, verification checklist against the Splink reference implementation).
-
-## Local Database Recreation (`.local-db/`)
-
-If you need a full local copy of the hackathon database — either because you don't have access to the shared Render instance or because you want to rebuild the pipeline end-to-end on your own Postgres — the `.local-db/` directory contains everything required.
+## Repository Structure
 
 ```
-.local-db/
-├── README.md       # Quick-start instructions
-├── export.js       # (maintainers) dump the live DB to local files
-├── import.js       # (participants) recreate the DB in your local Postgres
-├── manifest.json   # Table inventory with row counts + column metadata
-├── schemas/        # DDL (CREATE TABLE + INDEX + VIEW) per schema
-│   ├── cra.sql
-│   ├── fed.sql
-│   ├── ab.sql
-│   └── general.sql
-└── data/           # JSONL files, one per table (gitignored — ~13 GB total)
-    ├── cra/ fed/ ab/ general/
+FundTrace/
+├── Proto/                      # Streamlit application — main deliverable
+│   ├── app.py                  # Entry point + page routing
+│   ├── agent/
+│   │   ├── llm_client.py       # Claude API integration
+│   │   └── orchestrator.py     # Agentic coordination layer
+│   ├── tools/
+│   │   ├── retrieval.py        # Cross-dataset SQL + query builder
+│   │   ├── analytics.py        # Ghost-capacity scoring + anomaly detection
+│   │   └── preload.py          # Startup cache warming
+│   ├── views/
+│   │   ├── general.py          # Home page
+│   │   ├── fetch.py            # Step 1 — Search Organizations
+│   │   ├── analyze.py          # Step 3 — Run Analysis
+│   │   └── report.py           # Step 4 — View Report
+│   ├── models/schemas.py       # Shared data contracts
+│   └── requirements.txt
+│
+├── CRA/                        # CRA T3010 ETL + 18 analysis scripts
+├── FED/                        # Federal grants ETL + 10 analysis scripts
+├── AB/                         # Alberta open data ETL + 6 analysis scripts
+├── general/                    # Cross-dataset entity resolution pipeline
+│   └── splink/                 # Python probabilistic record linkage stage
+├── .local-db/                  # Local database recreation kit (DDL + import/export)
+├── ATTRIBUTIONS.md             # Data source citations + third-party credits
+└── LICENSE                     # MIT (source code only — data follows original licences)
 ```
 
-**Auto-discovering**: both `export.js` and `import.js` enumerate all tables via `information_schema.tables` at runtime, so new tables added to any schema (e.g. the entity-resolution or Splink tables in `general`) are picked up automatically — no code change required on either side.
-
-**For participants** (spinning up a local copy):
-```bash
-createdb hackathon                                     # or through your Postgres admin
-cd .local-db && npm install
-DB_CONNECTION_STRING=postgresql://user:pass@localhost/hackathon npm run import
-```
-
-**For maintainers** (refreshing the export from the live database):
-```bash
-cd .local-db && npm install
-DB_CONNECTION_STRING=postgresql://admin:pass@render.com:5432/... npm run export
-```
-
-Re-running `export` regenerates the schemas, manifest, and JSONL data for all four schemas (including the latest entity-resolution pipeline output). JSONL was chosen over CSV so that `jsonb`, `text[]`, nulls, and strings with embedded newlines/commas/quotes round-trip without escaping games. The JSONL data files in `.local-db/data/` are gitignored (~13 GB total); only the export/import code, DDL, and manifest travel with the repo.
-
-## Environment Configuration
-
-Each module loads environment variables in this order:
-
-1. **`.env.public`** loaded first — shared defaults. **Gitignored**, distributed by the hackathon organizers in the event-day info pack.
-2. **`.env`** loaded second with `override: true` — personal overrides, gitignored.
-
-Participants who drop the info-pack `.env.public` files into each module directory get read-only credentials automatically. Maintainers with a `.env` file (containing admin credentials) override for write operations like migrations and imports.
+---
 
 ## Quick Start
 
-```bash
-# Clone and install everything
-git clone <repo-url> && cd hackathon
-for dir in CRA FED AB general; do (cd $dir && npm install); done
+### Prerequisites
 
-# Option 1 — connect to the shared Render database (read-only for participants)
-# Nothing to do; the schemas are already loaded. Verify:
-cd CRA && npm run verify
-cd ../FED && npm run verify
-cd ../AB && npm run verify
+- Python 3.11+
+- PostgreSQL 14+ with `pg_trgm` extension enabled
+- An Anthropic API key (optional — app runs deterministically without one)
 
-# Option 2 — recreate the database in your own local Postgres
-createdb hackathon
-cd .local-db && npm install && DB_CONNECTION_STRING=postgresql://... npm run import
-
-# Run the dataset analysis scripts
-cd ../AB && npm run analyze:all
-cd ../CRA && npm run analyze:all
-
-# Run the entity-resolution pipeline (produces golden records across CRA+FED+AB)
-cd ../general
-npm install
-npm run entities:splink:install     # one-time: Splink Python dependencies
-npm run entities:dashboard          # http://localhost:3800 — pipeline control
-npm run entities:dossier            # http://localhost:3801 — per-entity explorer
-```
-
-## Database Access
-
-**Option A — shared read-only** (for querying from the hosted database):
-
-```
-postgresql://hackathon_readonly:...@render.com:5432/database_database_w2a1
-```
-
-Credentials are in each module's `.env.public`, distributed by the hackathon organizers in the event-day info pack. Read-only: `SELECT` works; `INSERT`/`UPDATE`/`DELETE` blocked. Suitable for participants doing analysis without a local setup.
-
-**Option B — local full copy** (for running the full pipeline or needing write access):
-
-Use `.local-db/` to recreate the database in your own Postgres instance. Run `.local-db/export.js` against the shared Render DB to produce fresh JSONL files, then `.local-db/import.js` to reload into your local DB. See [.local-db/README.md](.local-db/README.md) for details.
-
-**Schemas:** `cra`, `fed`, `ab`, `general` (`search_path` set via each module's `lib/db.js`).
-
-## Running the tests
-
-Cross-module unit and integration tests live in `tests/end-to-end.test.js` — they cover the shared libraries (transformers, loggers, CSV parsers, fuzzy-match, entity-resolver, LLM-review), database pool connectivity, and key integration paths.
+### Setup
 
 ```bash
-node --test tests/end-to-end.test.js
+git clone https://github.com/Rick0803/Agency-2026-Hackathon-FundTrace.git
+cd Agency-2026-Hackathon-FundTrace/Proto
+
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
+
+pip install -r requirements.txt
+
+cp .env.example .env
+# Set DB_CONNECTION_STRING and optionally ANTHROPIC_API_KEY in .env
 ```
 
-Pure-function tests run instantly. DB-dependent tests require the modules' `.env` / `.env.public` files to be in place (they connect via the same pool configuration as the rest of the pipeline).
+### Run
+
+```bash
+streamlit run app.py
+# → http://localhost:8501
+```
+
+See [Proto/README.md](Proto/README.md) for full setup details, environment variables, and deployment options.
+
+---
 
 ## License
 
-Source code and pipeline: **MIT** — see [LICENSE](LICENSE).
+Source code: **MIT** — see [LICENSE](LICENSE).
 
-Data: redistributed under the original publishers' licences — **[Open Government Licence – Canada](https://open.canada.ca/en/open-government-licence-canada)** (CRA and federal data) and **[Open Government Licence – Alberta](https://open.alberta.ca/licence)** (Alberta data). The MIT licence on this repository covers the source code only and does not relicense the underlying data. See [ATTRIBUTIONS.md](ATTRIBUTIONS.md) for full source-attribution details and third-party library credits; see [SECURITY.md](SECURITY.md) for the credential-handling convention.
-=======
-# Agency-2026-Hackathon
->>>>>>> d4d137d878cc9b2e03b53d380b3ce2b3170789cf
+Data: redistributed under the original open-government licences — [Open Government Licence – Canada](https://open.canada.ca/en/open-government-licence-canada) (CRA and federal data) and [Open Government Licence – Alberta](https://open.alberta.ca/licence) (Alberta data). The MIT licence covers source code only and does not relicense the underlying datasets. See [ATTRIBUTIONS.md](ATTRIBUTIONS.md) for full source attribution and third-party library credits.
