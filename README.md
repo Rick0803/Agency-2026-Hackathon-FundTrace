@@ -17,6 +17,14 @@ Built at the **Agency 2026 AI For Accountability Hackathon** (April 29, 2026).
 
 ---
 
+## Demo
+
+[![FundTrace Demo](https://img.youtube.com/vi/XFqNo-ySUmI/maxresdefault.jpg)](https://www.youtube.com/watch?v=XFqNo-ySUmI)
+
+*Click the thumbnail above to watch a full walkthrough of the project.*
+
+---
+
 ## The Investigation Workflow
 
 ```
